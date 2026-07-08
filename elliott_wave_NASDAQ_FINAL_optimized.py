@@ -1,24 +1,8 @@
 # ══════════════════════════════════════════════════════════════════
-# ELLIOTT WAVE MASTER WORKBOOK SCREENER — NASDAQ Composite
-#
-# Elliott Wave scan of all NASDAQ-listed common stocks (~3,300 tickers).
-# Scans all constituents of the NASDAQ Composite index.
-#
-# OUTPUT:  Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx
-# INSTALL: pip install yfinance pandas numpy openpyxl requests
-# RUN:     python elliott_wave_NASDAQ_Composite.py
-#
-# NOTE: NASDAQ Composite is a large universe (~3,300 tickers).
-#       A full scan can take 3-6 hours. Run overnight or on a server.
-# CHANGE ONLY:
-#   SCRIPT_DIR = where to save the output file
-# ══════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════
-# ELLIOTT WAVE MASTER WORKBOOK SCREENER — CUSTOM TICKER LIST
+# ELLIOTT WAVE MASTER WORKBOOK SCREENER — U.S. INDEX AUTO-FETCH
 #
 # OUTPUT:
-#   Elliott_Wave_CUSTOM_Master_Workbook.xlsx
+#   Elliott_Wave_<INDEX>_Master_Workbook.xlsx
 #   ├── Cheat_Sheet
 #   ├── Tomorrow_Buys
 #   ├── LongTerm_Buys
@@ -30,14 +14,13 @@
 #   └── All_3_Bullish
 #
 # INSTALL:
-#   pip install yfinance pandas numpy openpyxl
+#   pip install requests yfinance pandas numpy openpyxl lxml html5lib beautifulsoup4
 #
 # RUN:
-#   python elliott_wave_custom_tickers.py
+#   python elliott_wave_index_master_workbook.py
 #
-# CHANGE ONLY THESE INPUTS (see USER INPUTS section below):
-#   CUSTOM_TICKERS = ["AAPL", "TSLA", ...]
-#   CUSTOM_UNIVERSE_NAME = "My Watchlist"
+# CHANGE ONLY THESE INPUTS:
+#   INDEX_CHOICE = "SP500"
 #   OUTPUT_FILENAME = None
 # ══════════════════════════════════════════════════════════════════
 
@@ -51,73 +34,6 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import warnings
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import json
-import os
-import yfinance as yf
-
-FUNDAMENTALS_FILE = "fundamentals_history.json"
-
-_FUNDAMENTALS_HISTORY_CACHE = None
-_FUNDAMENTALS_HISTORY_DIRTY = False
-
-def _load_fundamentals_history():
-    global _FUNDAMENTALS_HISTORY_CACHE
-    if _FUNDAMENTALS_HISTORY_CACHE is None:
-        history = {}
-        if os.path.exists(FUNDAMENTALS_FILE):
-            with open(FUNDAMENTALS_FILE, "r") as f:
-                try:
-                    history = json.load(f)
-                except:
-                    pass
-        _FUNDAMENTALS_HISTORY_CACHE = history
-    return _FUNDAMENTALS_HISTORY_CACHE
-
-def _flush_fundamentals_history():
-    global _FUNDAMENTALS_HISTORY_DIRTY
-    if _FUNDAMENTALS_HISTORY_DIRTY and _FUNDAMENTALS_HISTORY_CACHE is not None:
-        with open(FUNDAMENTALS_FILE, "w") as f:
-            json.dump(_FUNDAMENTALS_HISTORY_CACHE, f, indent=4)
-        _FUNDAMENTALS_HISTORY_DIRTY = False
-
-def get_fundamental_status_with_history(ticker):
-    global _FUNDAMENTALS_HISTORY_DIRTY
-    try:
-        tkr = yf.Ticker(ticker)
-        info = tkr.info
-        roe = info.get('returnOnEquity', 0)
-        pm = info.get('profitMargins', 0)
-        rg = info.get('revenueGrowth', 0)
-
-        roe = roe if roe is not None else 0
-        pm = pm if pm is not None else 0
-        rg = rg if rg is not None else 0
-
-        is_strong = (roe > 0) and (pm > 0) and (rg > 0)
-        current_status = "Yes" if is_strong else "No"
-    except:
-        current_status = "Unknown"
-
-    history = _load_fundamentals_history()
-
-    previous_status = history.get(ticker, current_status)
-
-    if current_status != previous_status and current_status != "Unknown":
-        history[ticker] = current_status
-        _FUNDAMENTALS_HISTORY_DIRTY = True
-        _flush_fundamentals_history()
-        return f"{current_status} (Changed from {previous_status})"
-
-    if current_status != "Unknown":
-        history[ticker] = current_status
-        _FUNDAMENTALS_HISTORY_DIRTY = True
-        _flush_fundamentals_history()
-
-    return current_status
-
 warnings.filterwarnings("ignore")
 
 END_DATE = datetime.today()
@@ -125,43 +41,9 @@ END_DATE = datetime.today()
 # ────────────────────────────────────────────────────────────────
 # USER INPUTS — CHANGE ONLY THESE
 # ────────────────────────────────────────────────────────────────
+INDEX_CHOICE = "NASDAQ_COMPOSITE"   # SP500, NASDAQ100, DOW30, RUSSELL1000, RUSSELL2000, IWM, SP400, SP600, NASDAQ_COMPOSITE, NASDAQ1000, TOTAL_US
+OUTPUT_FILENAME = None   # None = auto name based on selected universe
 
-# ── ADD YOUR TICKERS HERE ────────────────────────────────────────
-CUSTOM_TICKERS = [
-    "AAPL", "TSLA", "NVDA", "MSFT", "AMZN",
-    "GOOGL", "META", "DELL", "AMD", "NFLX",  
-# ── BROAD MARKET EQUITY INDICES ─────────────────────────────
-    "SP500", "NASDAQ100", "DOW30", "RUSSELL2000", "TOTAL_MARKET", 
-    "MSCI_EAFE", "MSCI_EM", "FTSE_DEVELOPED", "VT",
-    
-    # ── CORE SECTORAL INDICES (S&P SPDR SERIES) ──────────────────
-    "XLK", "XLF", "XLV", "XLE", "XLY", "XLP", "XLI", "XLU", "XLB", "XLRE", "XLC",
-    
-    # ── DEFENSE & AEROSPACE INDICES ─────────────────────────────
-    "ITA", "PPA", "XAR", "SHLD", "FITE", "ARKX", "DFEN", "NATO",
-    
-    # ── SEMICONDUCTORS, AI & ADVANCED TECH ──────────────────────
-    "SOXX", "SMH", "BOTZ", "ROBO", "BUG", "CIBR", "SKYY", "WCLD", "FDN", "IBUY",
-    
-    # ── GREEN ENERGY, COMMODITIES & METALS ──────────────────────
-    "GSCI", "LIT", "GLD", "SLV", "USO", "UNG", "BJO", "DBA", "TAN", "FAN", "ICLN", "URA",
-    
-    # ── FIXED INCOME, TREASURIES & CASH INDICES ──────────────────
-    "AGG", "TLT", "IEF", "SHY", "LQD", "HYG", "BNDX", "EMB", "BIL",
-    
-    # ── GEOPOLITICAL, COUNTRY & REGIONAL INDICES ────────────────
-    "FXI", "MCHI", "EWG", "EWJ", "EWU", "INDA", "RSX", "EWW", "EWA", "EWC","ADUR","ASTS","AAPL", "TSLA", "NFLX", "FISV", "JD",   "PYPL", "STNG", "MRNA",
-    "NVDA", "MSFT", "AMZN", "BABA", "FNUC", "UPS",  "TGT",  "UNH",
-    "NKE",  "SOFI", "AVGO", "GRAB", "PFE","SPX","QQQ","NASDAQ","NIFTY50","GRRR","GNOM","NTRA","LLY","GH","ILMN"
-]
-
-# ── OPTIONAL: give your list a name ─────────────────────────────
-CUSTOM_UNIVERSE_NAME = "My Watchlist"   # shown in Excel tab headers
-CUSTOM_UNIVERSE_CODE = "CUSTOM"         # used in output filename
-
-#OUTPUT_FILENAME = None   # None = auto → Elliott_Wave_CUSTOM_Master_Workbook.xlsx
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILENAME = os.path.join(SCRIPT_DIR, "Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx")
 # Pivot settings
 PIVOT_LEFT_BARS = 5
 PIVOT_RIGHT_BARS = 5
@@ -422,26 +304,17 @@ def get_nasdaq_composite_proxy():
 
 def get_nasdaq1000_proxy():
     base = get_nasdaq_listed_common()
-    tickers = base["Ticker"].tolist()
-    caps = [None] * len(tickers)
+    caps = []
 
-    def _fetch_cap(idx_ticker):
-        idx, ticker = idx_ticker
+    for i, ticker in enumerate(base["Ticker"].tolist(), start=1):
         try:
             info = yf.Ticker(ticker).fast_info
-            return idx, ticker, info.get("marketCap", None)
+            caps.append((ticker, info.get("marketCap", None)))
         except Exception:
-            return idx, ticker, None
+            caps.append((ticker, None))
 
-    done_count = 0
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = [executor.submit(_fetch_cap, (i, t)) for i, t in enumerate(tickers)]
-        for future in as_completed(futures):
-            idx, ticker, cap = future.result()
-            caps[idx] = (ticker, cap)
-            done_count += 1
-            if done_count % 250 == 0:
-                print(f"Ranking Nasdaq universe by market cap: {done_count}/{len(tickers)}", end="\r")
+        if i % 250 == 0:
+            print(f"Ranking Nasdaq universe by market cap: {i}/{len(base)}", end="\r")
 
     cap_df = pd.DataFrame(caps, columns=["Ticker", "MarketCap"]).dropna()
     top = cap_df.sort_values("MarketCap", ascending=False).head(1000)[["Ticker"]]
@@ -540,31 +413,6 @@ def download_data(ticker, days, interval="1d"):
         return None
 
 
-
-
-def download_data_monthly(ticker, years=10):
-    """Download monthly OHLCV data for ultra-long-term EW analysis."""
-    start = END_DATE - timedelta(days=365 * years)
-    try:
-        df = yf.download(
-            ticker,
-            start=start,
-            end=END_DATE,
-            interval="1mo",
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
-        if df.empty or len(df) < 12:
-            return None
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-        needed = ["Open", "High", "Low", "Close", "Volume"]
-        if not all(col in df.columns for col in needed):
-            return None
-        return df[needed].dropna()
-    except Exception:
-        return None
-
 # ────────────────────────────────────────────────────────────────
 # INDICATORS
 # ────────────────────────────────────────────────────────────────
@@ -575,8 +423,8 @@ def rsi_calc(arr, period=14):
     delta = np.diff(arr)
     gains = np.where(delta > 0, delta, 0)
     losses = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gains).ewm(alpha=1/period, adjust=False).mean().values  # Wilder RMA
-    avg_loss = pd.Series(losses).ewm(alpha=1/period, adjust=False).mean().values  # Wilder RMA
+    avg_gain = pd.Series(gains).ewm(span=period, adjust=False).mean().values
+    avg_loss = pd.Series(losses).ewm(span=period, adjust=False).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
     return 100 - 100 / (1 + rs)
 
@@ -589,13 +437,14 @@ def macd_calc(arr, fast=12, slow=26, signal=9):
     return macd_line.values, signal_line.values, hist.values
 
 def obv_calc(close, volume):
-    close = np.asarray(close, dtype=float)
-    volume = np.asarray(volume, dtype=float)
-    if len(close) == 0:
-        return np.array([])
-    direction = np.sign(np.diff(close))
-    signed_vol = direction * volume[1:]
-    obv = np.concatenate(([0.0], np.cumsum(signed_vol)))
+    obv = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if close[i] > close[i - 1]:
+            obv[i] = obv[i - 1] + volume[i]
+        elif close[i] < close[i - 1]:
+            obv[i] = obv[i - 1] - volume[i]
+        else:
+            obv[i] = obv[i - 1]
     return obv
 
 def fmt_price(x):
@@ -618,48 +467,36 @@ def detect_confirmed_pivots(df, left_bars=5, right_bars=5):
     highs = df["High"].values
     lows = df["Low"].values
     idx = df.index
-    n = len(df)
-    win = left_bars + right_bars + 1
-
-    from numpy.lib.stride_tricks import sliding_window_view
-    hi_windows = sliding_window_view(highs, win)
-    lo_windows = sliding_window_view(lows, win)
-
-    center_idx = np.arange(left_bars, n - right_bars)
-    center_highs = highs[center_idx]
-    center_lows = lows[center_idx]
-
-    is_pivot_high = (center_highs == hi_windows.max(axis=1)) & \
-                    (np.sum(hi_windows == center_highs[:, None], axis=1) == 1)
-    is_pivot_low = (center_lows == lo_windows.min(axis=1)) & \
-                   (np.sum(lo_windows == center_lows[:, None], axis=1) == 1)
-
-    confirm_idx = center_idx + right_bars
     rows = []
 
-    hi_positions = center_idx[is_pivot_high]
-    hi_confirms = confirm_idx[is_pivot_high]
-    for i, ci in zip(hi_positions, hi_confirms):
-        rows.append({
-            "PivotType": "HIGH",
-            "PivotBar": int(i),
-            "ConfirmBar": int(ci),
-            "PivotDate": idx[i],
-            "ConfirmDate": idx[ci],
-            "PivotPrice": float(highs[i]),
-        })
+    for i in range(left_bars, len(df) - right_bars):
+        hi_window = highs[i - left_bars:i + right_bars + 1]
+        lo_window = lows[i - left_bars:i + right_bars + 1]
 
-    lo_positions = center_idx[is_pivot_low]
-    lo_confirms = confirm_idx[is_pivot_low]
-    for i, ci in zip(lo_positions, lo_confirms):
-        rows.append({
-            "PivotType": "LOW",
-            "PivotBar": int(i),
-            "ConfirmBar": int(ci),
-            "PivotDate": idx[i],
-            "ConfirmDate": idx[ci],
-            "PivotPrice": float(lows[i]),
-        })
+        is_pivot_high = highs[i] == np.max(hi_window) and np.sum(hi_window == highs[i]) == 1
+        is_pivot_low = lows[i] == np.min(lo_window) and np.sum(lo_window == lows[i]) == 1
+
+        confirm_i = i + right_bars
+
+        if is_pivot_high:
+            rows.append({
+                "PivotType": "HIGH",
+                "PivotBar": i,
+                "ConfirmBar": confirm_i,
+                "PivotDate": idx[i],
+                "ConfirmDate": idx[confirm_i],
+                "PivotPrice": float(highs[i]),
+            })
+
+        if is_pivot_low:
+            rows.append({
+                "PivotType": "LOW",
+                "PivotBar": i,
+                "ConfirmBar": confirm_i,
+                "PivotDate": idx[i],
+                "ConfirmDate": idx[confirm_i],
+                "PivotPrice": float(lows[i]),
+            })
 
     return pd.DataFrame(rows)
 
@@ -837,542 +674,6 @@ def wave_guidance(state, close, f382, f500, f618, f786, f100, f161, hi52, lo52, 
 # ────────────────────────────────────────────────────────────────
 # SCREENING ENGINE
 # ────────────────────────────────────────────────────────────────
-
-# ════════════════════════════════════════════════════════════════
-# EW STATE META — Duration / Next-State / Transition helpers
-# ════════════════════════════════════════════════════════════════
-_STATE_DURATION_BARS = {
-    # Long (weekly bars)
-    "CAPITULATION — BULL CYCLE STARTING":  (4,  16),
-    "ACCUMULATION — DOW PHASE 1":          (8,  26),
-    "WAVE 2 BUY ZONE — BEST LONG ENTRY":   (4,  13),
-    "WAVE 3 — STRONGEST WAVE (RIDE IT)":   (13, 52),
-    "WAVE 5 — LATE BULL, START TRIMMING":  (4,  13),
-    "BLOWOFF TOP — EXIT ALL LONGS":        (1,   4),
-    "BEAR MARKET — AVOID / CASH":          (13, 78),
-    "B-WAVE BULL TRAP — FAKE RALLY":       (2,   8),
-    "TRANSITIONING / SIDEWAYS":            (4,  26),
-    # Mid (daily bars)
-    "WAVE 2 BUY ZONE (BEST RISK:REWARD)":  (5,  21),
-    "WAVE 3 STARTING — ENTER NOW":         (3,   8),
-    "WAVE 3 ACTIVE — HOLD / TRAIL":        (10, 40),
-    "WAVE 3 ACTIVE":                       (10, 40),
-    "TRIANGLE — WAIT FOR THRUST":          (5,  20),
-    "WAVE 5 — REDUCE RISK":                (5,  15),
-    "B-WAVE TRAP — STAND ASIDE":           (3,  10),
-    "ACCUMULATION — BUILD SLOWLY":         (10, 30),
-    "WATCH LIST — SETUP FORMING":          (3,  15),
-    # Short (daily bars)
-    "3RD OF 3RD WAVE — DO NOT SHORT":      (2,   6),
-    "WAVE 3 BREAKOUT — ENTER NOW":         (2,   6),
-    "TRIANGLE THRUST — BUY BREAKOUT":      (2,   8),
-    "WAVE 3 ACTIVE — RIDE IT":             (5,  20),
-    "WAVE 5 TOP — START EXITING":          (3,  10),
-    "BLOWOFF — EXIT IMMEDIATELY":          (1,   3),
-    "SETUP FORMING — WAIT FOR SIGNAL":     (3,  10),
-}
-
-_NEXT_STATE_MAP = {
-    # Long
-    "CAPITULATION — BULL CYCLE STARTING":  ("ACCUMULATION — DOW PHASE 1",          6,  13),
-    "ACCUMULATION — DOW PHASE 1":          ("WAVE 2 BUY ZONE — BEST LONG ENTRY",   4,  10),
-    "WAVE 2 BUY ZONE — BEST LONG ENTRY":   ("WAVE 3 — STRONGEST WAVE (RIDE IT)",   2,   8),
-    "WAVE 3 — STRONGEST WAVE (RIDE IT)":   ("WAVE 5 — LATE BULL, START TRIMMING", 13,  52),
-    "WAVE 5 — LATE BULL, START TRIMMING":  ("BLOWOFF TOP — EXIT ALL LONGS",        2,   8),
-    "BLOWOFF TOP — EXIT ALL LONGS":        ("BEAR MARKET — AVOID / CASH",          1,   3),
-    "BEAR MARKET — AVOID / CASH":          ("CAPITULATION — BULL CYCLE STARTING", 13,  52),
-    "B-WAVE BULL TRAP — FAKE RALLY":       ("BEAR MARKET — AVOID / CASH",          2,   8),
-    "TRANSITIONING / SIDEWAYS":            ("WAVE 2 BUY ZONE — BEST LONG ENTRY",  4,  13),
-    # Mid
-    "WAVE 2 BUY ZONE (BEST RISK:REWARD)":  ("WAVE 3 STARTING — ENTER NOW",        3,   8),
-    "WAVE 3 STARTING — ENTER NOW":         ("WAVE 3 ACTIVE — HOLD / TRAIL",       1,   3),
-    "WAVE 3 ACTIVE — HOLD / TRAIL":        ("WAVE 5 — REDUCE RISK",              10,  40),
-    "WAVE 3 ACTIVE":                       ("WAVE 5 — REDUCE RISK",              10,  40),
-    "TRIANGLE — WAIT FOR THRUST":          ("WAVE 3 ACTIVE — HOLD / TRAIL",       2,   6),
-    "WAVE 5 — REDUCE RISK":                ("B-WAVE TRAP — STAND ASIDE",          5,  15),
-    "B-WAVE TRAP — STAND ASIDE":           ("ACCUMULATION — BUILD SLOWLY",        3,  10),
-    "ACCUMULATION — BUILD SLOWLY":         ("WAVE 2 BUY ZONE (BEST RISK:REWARD)", 5,  15),
-    "WATCH LIST — SETUP FORMING":          ("WAVE 2 BUY ZONE (BEST RISK:REWARD)", 3,  10),
-    # Short
-    "3RD OF 3RD WAVE — DO NOT SHORT":      ("WAVE 5 TOP — START EXITING",         2,   6),
-    "WAVE 3 BREAKOUT — ENTER NOW":         ("WAVE 3 ACTIVE — RIDE IT",            1,   3),
-    "TRIANGLE THRUST — BUY BREAKOUT":      ("WAVE 3 ACTIVE — RIDE IT",            1,   3),
-    "WAVE 3 ACTIVE — RIDE IT":             ("WAVE 5 TOP — START EXITING",         5,  20),
-    "WAVE 5 TOP — START EXITING":          ("BLOWOFF — EXIT IMMEDIATELY",         2,   8),
-    "BLOWOFF — EXIT IMMEDIATELY":          ("SETUP FORMING — WAIT FOR SIGNAL",    1,   3),
-    "SETUP FORMING — WAIT FOR SIGNAL":     ("WAVE 3 BREAKOUT — ENTER NOW",        3,  10),
-}
-
-_TRANSITION_TRIGGER_MAP = {
-    # Long
-    "CAPITULATION — BULL CYCLE STARTING":  "OBV turns up + RSI > 35 + 2 higher-low weekly closes",
-    "ACCUMULATION — DOW PHASE 1":          "Price reclaims 50 EMA with expanding volume",
-    "WAVE 2 BUY ZONE — BEST LONG ENTRY":   "Bounce from 61.8% Fib with MACD cross-up",
-    "WAVE 3 — STRONGEST WAVE (RIDE IT)":   "All 3 MAs bull-aligned + MACD histogram expanding",
-    "WAVE 5 — LATE BULL, START TRIMMING":  "RSI > 70 divergence + OBV bear-div forming",
-    "BLOWOFF TOP — EXIT ALL LONGS":        "Volume climax candle + RSI > 80 reversal",
-    "BEAR MARKET — AVOID / CASH":          "Price reclaims 200 EMA + MACD cross-up above zero",
-    "B-WAVE BULL TRAP — FAKE RALLY":       "MACD cross-down + price breaks back below 200 EMA",
-    "TRANSITIONING / SIDEWAYS":            "MACD cross-up or 61.8% Fib bounce with volume",
-    # Mid
-    "WAVE 2 BUY ZONE (BEST RISK:REWARD)":  "MACD cross-up + price holds 61.8% Fib level",
-    "WAVE 3 STARTING — ENTER NOW":         "Price + volume break above recent swing high",
-    "WAVE 3 ACTIVE — HOLD / TRAIL":        "Price pulls back to 20 EMA without MACD cross-down",
-    "WAVE 3 ACTIVE":                       "Price pulls back to 20 EMA without MACD cross-down",
-    "TRIANGLE — WAIT FOR THRUST":          "Volume surge + close above triangle upper boundary",
-    "WAVE 5 — REDUCE RISK":                "OBV bear-div + RSI > 65 with MACD histogram shrinking",
-    "B-WAVE TRAP — STAND ASIDE":           "Break of most recent swing low on volume",
-    "ACCUMULATION — BUILD SLOWLY":         "Price reclaims 50 EMA + OBV trending up",
-    "WATCH LIST — SETUP FORMING":          "MACD cross-up + RSI > 50 + price > 20 EMA",
-    # Short
-    "3RD OF 3RD WAVE — DO NOT SHORT":      "Volume dries up + RSI > 75 divergence",
-    "WAVE 3 BREAKOUT — ENTER NOW":         "Sustained close + volume above breakout level",
-    "TRIANGLE THRUST — BUY BREAKOUT":      "Second close above triangle boundary on volume",
-    "WAVE 3 ACTIVE — RIDE IT":             "20 EMA acts as support + hold while RSI > 50",
-    "WAVE 5 TOP — START EXITING":          "Volume spike + bearish engulfing daily candle",
-    "BLOWOFF — EXIT IMMEDIATELY":          "Any close below 20 EMA with volume > 1.5x average",
-    "SETUP FORMING — WAIT FOR SIGNAL":     "MACD cross-up + RSI > 50 + price > 50 EMA",
-}
-
-
-def _bars_to_human(bars_min, bars_max, horizon):
-    """Convert a bar-count range to a readable human string."""
-    if horizon == "long":  # weekly bars
-        wk_lo, wk_hi = bars_min, bars_max
-        if wk_hi <= 4:
-            return f"~{wk_lo}-{wk_hi} weeks"
-        mo_lo = round(wk_lo / 4.3, 1)
-        mo_hi = round(wk_hi / 4.3, 1)
-        if mo_hi <= 3:
-            return f"~{mo_lo}-{mo_hi} months"
-        return f"~{round(mo_lo)}-{round(mo_hi)} months"
-    else:  # daily bars (mid + short)
-        if bars_max <= 10:
-            return f"~{bars_min}-{bars_max} days"
-        wk_lo = round(bars_min / 5, 1)
-        wk_hi = round(bars_max / 5, 1)
-        if wk_hi <= 8:
-            return f"~{wk_lo}-{wk_hi} weeks"
-        mo_lo = round(wk_lo / 4.3, 1)
-        mo_hi = round(wk_hi / 4.3, 1)
-        return f"~{mo_lo}-{mo_hi} months"
-
-
-def _current_state_bars(df, state_key, horizon):
-    """Count consecutive bars the stock has been in the current EW state."""
-    if df is None or len(df) < 5:
-        return 0
-    c = df["Close"].values
-    n = len(c)
-    p200 = min(200, max(20, n // 2))
-    p50  = min(50,  max(10, n // 3))
-    m200 = pd.Series(c).ewm(span=p200, adjust=False).mean().values
-    m50  = pd.Series(c).ewm(span=p50,  adjust=False).mean().values
-    s = state_key.upper()
-    if "WAVE 3" in s or "3RD OF 3RD" in s or "BREAKOUT" in s:
-        cond = lambda i: c[i] > m200[i] and c[i] > m50[i]
-    elif "WAVE 2" in s or "BUY ZONE" in s:
-        cond = lambda i: c[i] > m200[i]
-    elif "CAPITULATION" in s or "ACCUMULATION" in s:
-        cond = lambda i: c[i] <= m200[i]
-    elif "BEAR" in s or "BLOWOFF" in s or "TRAP" in s:
-        cond = lambda i: c[i] < m200[i]
-    else:
-        cond = lambda i: True
-    count = 0
-    for i in range(n - 1, max(n - 200, 0), -1):
-        if cond(i):
-            count += 1
-        else:
-            break
-    return count
-
-
-
-# ════════════════════════════════════════════════════════════════
-# FROST & PRECHTER — COMPLETE RULE SET ADDITIONS
-# ════════════════════════════════════════════════════════════════
-
-# ────────────────────────────────────────────────────────────────
-# A1. WAVE DEGREE CLASSIFIER
-#     Supercycle / Cycle / Primary / Intermediate / Minor / Minute
-# ────────────────────────────────────────────────────────────────
-def classify_wave_degree(horizon, n_bars, bar_interval="1wk"):
-    """
-    Assigns Frost & Prechter wave degree based on timeframe + bar count.
-    Grand Supercycle → years/decades (beyond our data)
-    Supercycle       → weekly 5yr
-    Cycle            → weekly 1-2yr
-    Primary          → daily 6-12mo
-    Intermediate     → daily 1-3mo
-    Minor            → daily 2-6wk
-    Minute           → daily <2wk
-    """
-    if bar_interval == "1wk":
-        if n_bars >= 200:
-            return "Supercycle"
-        elif n_bars >= 80:
-            return "Cycle"
-        else:
-            return "Primary"
-    else:  # daily
-        if n_bars >= 180:
-            return "Primary"
-        elif n_bars >= 60:
-            return "Intermediate"
-        elif n_bars >= 20:
-            return "Minor"
-        else:
-            return "Minute"
-
-
-# ────────────────────────────────────────────────────────────────
-# A2. CORRECTIVE PATTERN CLASSIFIER
-#     Zigzag (5-3-5) | Flat (3-3-5) | Triangle (3-3-3-3-3)
-#     Double Three | Irregular
-# ────────────────────────────────────────────────────────────────
-def classify_corrective_pattern(pivots_df, close_arr, swg_hi, swg_lo):
-    """
-    Uses confirmed pivots to classify the most recent corrective structure.
-    Returns a string: Zigzag / Flat / Triangle / Double-Three / Unknown
-    """
-    if pivots_df is None or pivots_df.empty or len(close_arr) < 20:
-        return "Unknown"
-
-    lows_  = pivots_df[pivots_df["PivotType"] == "LOW"].sort_values("PivotBar")
-    highs_ = pivots_df[pivots_df["PivotType"] == "HIGH"].sort_values("PivotBar")
-
-    if len(lows_) < 2 or len(highs_) < 1:
-        return "Unknown"
-
-    # Most recent A-low and B-high
-    last_low_a  = lows_.iloc[-1]["PivotPrice"]
-    last_low_b  = lows_.iloc[-2]["PivotPrice"] if len(lows_) >= 2 else None
-    last_high_b = highs_.iloc[-1]["PivotPrice"]
-    cur         = close_arr[-1]
-    fib_range   = swg_hi - swg_lo if swg_hi > swg_lo else 0.001
-
-    # Zigzag: Wave B retraces < 61.8% of Wave A
-    if last_low_b is not None:
-        wave_a = abs(swg_hi - last_low_a)
-        wave_b = abs(last_high_b - last_low_a)
-        b_retrace = wave_b / wave_a if wave_a > 0 else 0
-
-        if b_retrace < 0.618:
-            return "Zigzag (5-3-5)"
-        elif 0.80 <= b_retrace <= 1.02:
-            return "Flat (3-3-5)"
-        elif b_retrace > 1.02:
-            return "Expanded Flat / Irregular"
-
-    # Triangle: range contracting in last 5 pivots
-    all_pivots = pivots_df.sort_values("PivotBar").tail(10)
-    if len(all_pivots) >= 6:
-        prices = all_pivots["PivotPrice"].values
-        highs_seq = prices[1::2]
-        lows_seq  = prices[::2]
-        if len(highs_seq) >= 2 and len(lows_seq) >= 2:
-            h_contracting = highs_seq[-1] < highs_seq[-2] if len(highs_seq) >= 2 else False
-            l_contracting = lows_seq[-1]  > lows_seq[-2]  if len(lows_seq)  >= 2 else False
-            if h_contracting and l_contracting:
-                return "Triangle (3-3-3-3-3)"
-
-    return "Simple Correction / Double-Three"
-
-
-# ────────────────────────────────────────────────────────────────
-# A3. DIAGONAL TRIANGLE DETECTOR (Frost Ch 1-2)
-#     Ending Diagonal = Wave 5 or Wave C converging wedge
-#     Leading Diagonal = Wave 1 or Wave A converging wedge
-# ────────────────────────────────────────────────────────────────
-def detect_diagonal_triangle(df, horizon="short"):
-    """
-    Detects wedge / diagonal triangle pattern using recent 20-40 bars.
-    Returns: 'Ending Diagonal', 'Leading Diagonal', or None
-    """
-    if df is None or len(df) < 20:
-        return None
-
-    n = min(40, len(df))
-    highs  = df["High"].values[-n:]
-    lows   = df["Low"].values[-n:]
-    closes = df["Close"].values[-n:]
-
-    # Fit linear trend to highs and lows
-    x = np.arange(n)
-    # Slope of upper boundary (highs)
-    hi_slope = np.polyfit(x, highs, 1)[0]
-    # Slope of lower boundary (lows)
-    lo_slope = np.polyfit(x, lows, 1)[0]
-
-    # Converging wedge: upper slope falling, lower slope rising (or both narrowing)
-    converging = hi_slope < 0 and lo_slope > 0
-    narrowing  = abs(highs[-1] - lows[-1]) < abs(highs[0] - lows[0]) * 0.75
-
-    if not (converging or narrowing):
-        return None
-
-    # Ending diagonal: appears at end of Wave 5 (price near 52w high, RSI diverging)
-    rsi = rsi_calc(closes)
-    rsi_diverging = len(rsi) > 10 and closes[-1] > closes[-10] and rsi[-1] < rsi[-10]
-    if rsi_diverging:
-        return "Ending Diagonal (Wave 5 warning)"
-
-    # Leading diagonal: appears at start (price recovering from lows)
-    price_recovering = closes[-1] > closes[0]
-    if price_recovering and not rsi_diverging:
-        return "Leading Diagonal (Wave 1 / Wave A)"
-
-    return "Diagonal Triangle (Unspecified)"
-
-
-# ────────────────────────────────────────────────────────────────
-# A4. TREND CHANNEL BUILDER (Frost Ch 2 — Channeling)
-#     Connects W2 low → W4 low (base channel)
-#     Projects W5 target from W3 top (parallel)
-# ────────────────────────────────────────────────────────────────
-def build_wave_channel(pivots_df, df):
-    """
-    Frost & Prechter channeling technique:
-    1) Draw line through W2 and W4 bottoms
-    2) Parallel through W3 top → gives W5 target zone
-    Returns dict with channel values or empty dict.
-    """
-    if pivots_df is None or pivots_df.empty or df is None or len(df) < 20:
-        return {"Channel_Base": "", "Channel_Top": "", "W5_Channel_Target": ""}
-
-    lows  = pivots_df[pivots_df["PivotType"] == "LOW"].sort_values("PivotBar")
-    highs = pivots_df[pivots_df["PivotType"] == "HIGH"].sort_values("PivotBar")
-
-    if len(lows) < 2 or len(highs) < 1:
-        return {"Channel_Base": "", "Channel_Top": "", "W5_Channel_Target": ""}
-
-    # Use most recent confirmed pivot low pair as W2 / W4 proxies
-    w4_low_price  = float(lows.iloc[-1]["PivotPrice"])
-    w2_low_price  = float(lows.iloc[-2]["PivotPrice"]) if len(lows) >= 2 else w4_low_price
-    w3_high_price = float(highs.iloc[-1]["PivotPrice"])
-
-    w4_low_bar = int(lows.iloc[-1]["PivotBar"])
-    w2_low_bar = int(lows.iloc[-2]["PivotBar"]) if len(lows) >= 2 else w4_low_bar - 10
-
-    # Slope of base channel
-    bar_diff = w4_low_bar - w2_low_bar
-    if bar_diff == 0:
-        return {"Channel_Base": "", "Channel_Top": "", "W5_Channel_Target": ""}
-
-    slope = (w4_low_price - w2_low_price) / bar_diff
-
-    # Project forward ~5-15 bars for W5 channel target
-    bars_forward = max(5, bar_diff // 2)
-    n_total = len(df)
-    w5_bar = n_total + bars_forward
-
-    # Base channel at W5 bar
-    channel_base_w5 = w4_low_price + slope * bars_forward
-
-    # Height = W3 top minus W2 low (channel width)
-    channel_width = w3_high_price - w2_low_price
-    channel_top_w5 = channel_base_w5 + channel_width
-
-    return {
-        "Channel_Base": round(channel_base_w5, 2),
-        "Channel_Top":  round(channel_top_w5,  2),
-        "W5_Channel_Target": round(channel_top_w5, 2),
-    }
-
-
-# ────────────────────────────────────────────────────────────────
-# A5. FIBONACCI TIME PROJECTIONS (Frost Ch 4)
-#     Projects WHEN the next wave might end
-#     Uses Fib ratios: 0.382, 0.618, 1.0, 1.618 of prior wave duration
-# ────────────────────────────────────────────────────────────────
-def fibonacci_time_projection(pivots_df, df, horizon="long"):
-    """
-    Projects the end date/bar of the CURRENT wave using Fibonacci time ratios
-    applied to the immediately prior wave's duration.
-    Returns estimated bars_remaining and calendar date.
-    """
-    result = {
-        "Wave_Duration_Bars":    "",
-        "Wave_End_Est_Bars":     "",
-        "Wave_End_Est_Date":     "",
-        "Wave_End_Est_Price":    "",
-        "Next_Wave_Start_Est":   "",
-        "Fib_Time_Ratio_Used":   "",
-    }
-
-    if pivots_df is None or pivots_df.empty or df is None or len(df) < 20:
-        return result
-
-    all_pivots = pivots_df.sort_values("ConfirmBar")
-    if len(all_pivots) < 3:
-        return result
-
-    # Get last 3 confirmed pivots to measure wave durations
-    p3 = all_pivots.iloc[-1]
-    p2 = all_pivots.iloc[-2]
-    p1 = all_pivots.iloc[-3]
-
-    prior_wave_bars  = int(p2["ConfirmBar"]) - int(p1["ConfirmBar"])
-    current_wave_bars = int(len(df) - 1) - int(p2["ConfirmBar"])
-
-    if prior_wave_bars <= 0:
-        return result
-
-    # Fibonacci time ratios from Frost & Prechter Ch 4
-    fib_ratios = [0.382, 0.618, 1.0, 1.618, 2.618]
-    best_ratio = None
-    bars_remaining = None
-
-    for ratio in fib_ratios:
-        projected_total = prior_wave_bars * ratio
-        remaining = projected_total - current_wave_bars
-        if remaining > 0:
-            best_ratio = ratio
-            bars_remaining = int(remaining)
-            break
-
-    if bars_remaining is None or bars_remaining > 200:
-        bars_remaining = prior_wave_bars  # fallback: same duration as prior wave
-
-    # Convert bars to calendar date
-    try:
-        last_date = pd.to_datetime(df.index[-1])
-        if horizon == "long":
-            end_date = last_date + pd.tseries.offsets.Week(bars_remaining)
-            next_wave_date = last_date + pd.tseries.offsets.Week(bars_remaining + 2)
-        else:
-            end_date = last_date + pd.tseries.offsets.BDay(bars_remaining)
-            next_wave_date = last_date + pd.tseries.offsets.BDay(bars_remaining + 3)
-
-        # Estimate price at wave end using linear channel slope
-        close_arr = df["Close"].values
-        slope_30 = (close_arr[-1] - close_arr[-min(30, len(close_arr))]) / min(30, len(close_arr))
-        est_price = close_arr[-1] + slope_30 * bars_remaining * 0.5  # damped projection
-
-        result["Wave_Duration_Bars"]  = current_wave_bars
-        result["Wave_End_Est_Bars"]   = bars_remaining
-        result["Wave_End_Est_Date"]   = str(end_date.date())
-        result["Wave_End_Est_Price"]  = round(float(est_price), 2)
-        result["Next_Wave_Start_Est"] = str(next_wave_date.date())
-        result["Fib_Time_Ratio_Used"] = str(best_ratio) if best_ratio else "1.0"
-
-    except Exception:
-        pass
-
-    return result
-
-
-# ────────────────────────────────────────────────────────────────
-# A6. WALK-FORWARD BACKTEST ENGINE
-#     Slides a window back in time, runs ew_screen(), records
-#     signal → outcome (did price go up 5%+ in next N bars?)
-# ────────────────────────────────────────────────────────────────
-def backtest_ticker(ticker, horizon="long", lookback_windows=8, fwd_bars=20):
-    """
-    Walk-forward backtest for a single ticker.
-    Returns DataFrame of: Date | State | Signal | Fwd_Return | Hit
-    """
-    days   = 365 * 5 if horizon == "long" else 365
-    intv   = "1wk"   if horizon == "long" else "1d"
-    df_all = download_data(ticker, days, interval=intv)
-
-    if df_all is None or len(df_all) < 100:
-        return pd.DataFrame()
-
-    rows = []
-    step = max(5, len(df_all) // (lookback_windows + 1))
-
-    for i in range(lookback_windows):
-        end_idx = len(df_all) - fwd_bars - i * step
-        if end_idx < 60:
-            break
-
-        df_slice = df_all.iloc[:end_idx].copy()
-        result   = ew_screen(df_slice, horizon)
-
-        if result is None:
-            continue
-
-        state  = result["Elliott_State"]
-        action = result["Recommended_Action"]
-        price_at_signal = df_all["Close"].iloc[end_idx - 1]
-        price_fwd = df_all["Close"].iloc[min(end_idx + fwd_bars - 1, len(df_all) - 1)]
-        fwd_ret   = (price_fwd - price_at_signal) / price_at_signal * 100
-
-        is_buy = any(k in state.upper() for k in ["WAVE 2", "WAVE 3", "ACCUMULATION", "CAPITULATION", "BREAKOUT"])
-        hit    = (fwd_ret > 5.0) if is_buy else (fwd_ret < -2.0)
-
-        rows.append({
-            "Date":        str(df_all.index[end_idx - 1].date()),
-            "Elliott_State": state,
-            "Signal":      action,
-            "Price":       round(float(price_at_signal), 2),
-            "Fwd_Return_%": round(fwd_ret, 2),
-            "Hit":         "✅" if hit else "❌",
-            "Is_Buy_Signal": is_buy,
-        })
-
-    return pd.DataFrame(rows)
-
-
-def run_backtest_summary(tickers, horizon="long", lookback_windows=6, fwd_bars=20, max_workers=8):
-    """
-    Runs backtest across all tickers and returns summary DataFrame.
-    Parallelized with a thread pool since each ticker's backtest is an
-    independent, network I/O-bound operation (yfinance download).
-    Per-ticker backtest logic is unchanged from the original.
-    """
-    all_rows = []
-
-    def _run_one(ticker):
-        try:
-            bt = backtest_ticker(ticker, horizon, lookback_windows, fwd_bars)
-            if not bt.empty:
-                bt.insert(0, "Ticker", ticker)
-                return bt
-        except Exception:
-            pass
-        return None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_run_one, ticker) for ticker in tickers]
-        for future in as_completed(futures):
-            bt = future.result()
-            if bt is not None:
-                all_rows.append(bt)
-
-    if not all_rows:
-        return pd.DataFrame()
-
-    combined = pd.concat(all_rows, ignore_index=True)
-    return combined
-
-
-
-def ew_state_meta(state, df, horizon):
-    """Return the 6 new EW state columns for a given state + dataframe."""
-    key = str(state).strip().upper()
-    dur_bars = _current_state_bars(df, key, horizon)
-    dur_min, dur_max = _STATE_DURATION_BARS.get(key, (max(dur_bars, 1), max(dur_bars, 1)))
-    dur_human = _bars_to_human(dur_min, dur_max, horizon) if dur_bars > 0 else "unknown"
-    next_info = _NEXT_STATE_MAP.get(key)
-    if next_info:
-        next_state, eta_min, eta_max = next_info
-        eta_human = _bars_to_human(eta_min, eta_max, horizon)
-        eta_bars_display = f"{eta_min}-{eta_max}"
-    else:
-        next_state, eta_bars_display, eta_human = "—", "—", "—"
-    trigger = _TRANSITION_TRIGGER_MAP.get(key, "Watch RSI + MACD + price vs EMAs")
-    return {
-        "State_Duration_Bars":  dur_bars if dur_bars > 0 else "—",
-        "State_Duration_Human": dur_human,
-        "Next_EW_State":        next_state,
-        "Next_State_ETA_Bars":  eta_bars_display,
-        "Next_State_ETA_Human": eta_human,
-        "Transition_Trigger":   trigger,
-    }
-
 def ew_screen(df, horizon="long"):
     if df is None or len(df) < 50:
         return None
@@ -1420,7 +721,7 @@ def ew_screen(df, horizon="long"):
     vol_ratio = v[-1] / (vol_ma20[-1] + 1e-6) if len(vol_ma20) else 0
     vol_rising = np.mean(v[-5:]) > np.mean(v[-20:]) if len(v) >= 20 else False
     vol_dry = vol_ratio < 0.75
-    vol_surge = vol_ratio > 1.1   # Wave 3 = sustained volume, not just spikes
+    vol_surge = vol_ratio > 1.5
     vol_climax = vol_ratio > 2.5
 
     obv = obv_calc(c, v)
@@ -1429,7 +730,7 @@ def ew_screen(df, horizon="long"):
     obv_bull_div = c[-1] < c[-10] and obv[-1] > obv[-10] if len(c) > 10 else False
     obv_bear_div = c[-1] > c[-10] and obv[-1] < obv[-10] if len(c) > 10 else False
 
-    lb = min(260, n) if horizon == "long" else min(100, n)  # long=~5yr weekly, mid/short=100 daily
+    lb = min(100, n)
     swg_hi = np.max(h[-lb:])
     swg_lo = np.min(l[-lb:])
     fib_range = swg_hi - swg_lo if swg_hi > swg_lo else 0.0001
@@ -1441,7 +742,7 @@ def ew_screen(df, horizon="long"):
     f100 = swg_lo
     f161 = swg_hi + fib_range * 0.618
 
-    in_w2_zone = False  # defined after rule1_ok below
+    in_w2_zone = (f618 * 0.97 <= c[-1] <= f618 * 1.03) and above_200
     near_bottom = c[-1] <= f100 * 1.05 and not above_50
 
     hi52 = np.max(h[-252:]) if n >= 252 else np.max(h)
@@ -1456,19 +757,18 @@ def ew_screen(df, horizon="long"):
 
     selling_climax = vol_climax and not above_50 and rsi_cur < 30
     blowoff = vol_climax and above_200 and rsi_cur > 75
-    wave3_active = macd_bull and macd_expanding and bull_ma_score >= 2 and (vol_surge or vol_ratio > 0.9)
+    wave3_active = vol_surge and macd_bull and macd_expanding and bull_ma_score == 3
     wave5_warn = (
         c[-1] >= np.max(c[-20:]) * 0.995 and
         vol_dry and
         (rsi_cur > 65 or obv_bear_div) and
+        macd_div_bear and
         above_200
-        # macd_div_bear removed: Wave 5 top warning must fire BEFORE MACD rolls over
     )
-    b_trap = ((not above_200) and len(c) > 5 and c[-1] > c[-5] and macd_shrinking and vol_ratio < 1.1)
-    accumulation = above_50 and not above_200 and 35 < rsi_cur < 58 and (obv_rising or rsi_rising)  # EW-V3 fix: early Dow Phase1 OBV may lag
+    b_trap = (not above_200) and c[-1] > c[-5] and macd_shrinking and vol_ratio < 1.1 if len(c) > 5 else False
+    accumulation = above_50 and not above_200 and 35 < rsi_cur < 58 and obv_rising
 
     rule1_ok = c[-1] > f100
-    in_w2_zone = (f618 * 0.97 <= c[-1] <= f618 * 1.03) and rule1_ok  # EW-V2 fix: rule1_ok guards Wave2, not above_200
     w4_overlap_risk = above_200 and c[-1] < f786 and 35 < rsi_cur < 50
 
     pivot_info = recent_pivot_summary(
@@ -1505,16 +805,16 @@ def ew_screen(df, horizon="long"):
             state = "CAPITULATION — Bull Cycle Starting"
         elif accumulation or (near_bottom and obv_rising):
             state = "ACCUMULATION — Dow Phase 1"
-        elif (ma_bull_align or bull_ma_score == 3) and macd_bull and macd_expanding:
-            state = "WAVE 3 — Strongest Wave (Ride It)"  # EW-V4 fix: catch early W3 when 50EMA still below 200EMA
+        elif ma_bull_align and macd_bull and macd_expanding:
+            state = "WAVE 3 — Strongest Wave (Ride It)"
         elif bull_ma_score >= 2 and (macd_div_bull or in_w2_zone):
             state = "WAVE 2 Buy Zone — Best Long Entry"
         elif wave5_warn:
             state = "WAVE 5 — Late Bull, Start Trimming"
         elif blowoff:
             state = "BLOWOFF TOP — Exit All Longs"
-        elif ma_bear_align or (not above_200 and not above_50 and rsi_cur < 45):
-            state = "BEAR MARKET — Avoid / Cash"  # EW-V5 fix: partial bear (dead-cat bounce won't fool it)
+        elif ma_bear_align:
+            state = "BEAR MARKET — Avoid / Cash"
         elif b_trap:
             state = "B-WAVE BULL TRAP — Fake Rally"
         else:
@@ -1597,7 +897,7 @@ def ew_screen(df, horizon="long"):
         if vol_ratio > 2.0:
             score += 5; signals.append("Volume Climax Confirmation")
 
-        if macd_bull and macd_expanding and bull_ma_score >= 2 and vol_surge:
+        if macd_bull and macd_expanding and bull_ma_score == 3 and vol_surge:
             state = "3rd of 3rd Wave — DO NOT SHORT"
         elif macd_cross_up and vol_ratio > 1.3 and above_50:
             state = "WAVE 3 Breakout — Enter Now"
@@ -1637,12 +937,6 @@ def ew_screen(df, horizon="long"):
         m200=m200[-1]
     )
 
-
-    # ── Frost & Prechter: Channel + Fib Time (injected before return) ────
-    _piv_df = detect_confirmed_pivots(df, PIVOT_LEFT_BARS, PIVOT_RIGHT_BARS)
-    channel_info = build_wave_channel(_piv_df, df)
-    fib_time     = fibonacci_time_projection(_piv_df, df, horizon)
-
     return {
         "EW_Score": min(score, 100),
         "Trade_Quality": explain["Trade_Quality"],
@@ -1681,302 +975,84 @@ def ew_screen(df, horizon="long"):
         "Pivot_High": pivot_info["Pivot_High"],
         "Pivot_High_Date": pivot_info["Pivot_High_Date"],
         "Pivot_High_Price": pivot_info["Pivot_High_Price"],
-        "Pivot_High_Bars_Ago": pivot_info["Pivot_High_Bars_Ago"],
-
-        # ── NEW: Frost & Prechter Complete Rule Set ──────────────────────
-        "Wave_Degree":          classify_wave_degree(horizon, n,
-                                    "1wk" if horizon == "long" else "1d"),
-        "Corrective_Pattern":   classify_corrective_pattern(
-                                    detect_confirmed_pivots(df, PIVOT_LEFT_BARS, PIVOT_RIGHT_BARS),
-                                    c, swg_hi, swg_lo),
-        "Diagonal_Triangle":    detect_diagonal_triangle(df, horizon) or "None",
-        "Channel_Base":         channel_info.get("Channel_Base", ""),
-        "Channel_Top":          channel_info.get("Channel_Top", ""),
-        "W5_Channel_Target":    channel_info.get("W5_Channel_Target", ""),
-        "Wave_Duration_Bars":   fib_time.get("Wave_Duration_Bars", ""),
-        "Wave_End_Est_Bars":    fib_time.get("Wave_End_Est_Bars", ""),
-        "Wave_End_Est_Date":    fib_time.get("Wave_End_Est_Date", ""),
-        "Wave_End_Est_Price":   fib_time.get("Wave_End_Est_Price", ""),
-        "Next_Wave_Start_Est":  fib_time.get("Next_Wave_Start_Est", ""),
-        "Fib_Time_Ratio":       fib_time.get("Fib_Time_Ratio_Used", ""),
-                **ew_state_meta(state, df, horizon)
+        "Pivot_High_Bars_Ago": pivot_info["Pivot_High_Bars_Ago"]
     }
 
 
+# ────────────────────────────────────────────────────────────────
+# GET UNIVERSE
+# ────────────────────────────────────────────────────────────────
+UNIVERSE_NAME, UNIVERSE_CODE, universe_meta = get_universe(INDEX_CHOICE)
+TICKERS = universe_meta["Ticker"].tolist()
+
+if OUTPUT_FILENAME is None:
+    OUTPUT_FILENAME = f"Elliott_Wave_{UNIVERSE_CODE}_Master_Workbook.xlsx"
+
+print("=" * 72)
+print(f"ELLIOTT WAVE {UNIVERSE_NAME.upper()} MASTER WORKBOOK SCREENER")
+print(f"Scan time: {datetime.today().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"{UNIVERSE_NAME} tickers fetched: {len(TICKERS)}")
+print("=" * 72)
 
 
-# ════════════════════════════════════════════════════════════════
-# U.S. EXCHANGE UNIVERSE BUILDERS
-# ════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────
+# RUN SCAN
+# ────────────────────────────────────────────────────────────────
+results_lt, results_mt, results_st = [], [], []
 
-# ── Public ETF Master List ───────────────────────────────────────
-ETF_UNIVERSE = {
-    # Broad Market
-    "SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF", "DIA": "Dow 30 ETF",
-    "IWM": "Russell 2000 ETF", "VTI": "Total US Market ETF", "VT": "Total World ETF",
-    # Sector SPDRs
-    "XLK": "Technology", "XLF": "Financials", "XLV": "Health Care",
-    "XLE": "Energy", "XLY": "Consumer Discret.", "XLP": "Consumer Staples",
-    "XLI": "Industrials", "XLU": "Utilities", "XLB": "Materials",
-    "XLRE": "Real Estate", "XLC": "Communication",
-    # Thematic
-    "SOXX": "Semiconductors", "SMH": "Semiconductors 2",
-    "BOTZ": "Robotics & AI", "ROBO": "Robotics", "ARKK": "ARK Innovation",
-    "ARKG": "ARK Genomics", "ARKW": "ARK Web 3.0",
-    "BUG": "Cybersecurity", "CIBR": "Cybersecurity 2",
-    "SKYY": "Cloud Computing", "WCLD": "Cloud 2", "FDN": "Internet",
-    "GLD": "Gold", "SLV": "Silver", "USO": "Oil", "UNG": "Nat Gas",
-    "TAN": "Solar", "FAN": "Wind", "ICLN": "Clean Energy", "URA": "Uranium",
-    "LIT": "Lithium & Battery", "DBA": "Agriculture",
-    "AGG": "Bonds Agg", "TLT": "20yr Treasury", "IEF": "7-10yr Treasury",
-    "SHY": "1-3yr Treasury", "LQD": "IG Corp Bonds", "HYG": "High Yield",
-    "BIL": "T-Bills", "BNDX": "Intl Bonds", "EMB": "EM Bonds",
-    "ITA": "Defense & Aerospace", "PPA": "Defense 2", "DFEN": "Defense 3x",
-    "FXI": "China Large Cap", "MCHI": "MSCI China",
-    "EWG": "Germany", "EWJ": "Japan", "EWU": "UK", "INDA": "India",
-    "EWW": "Mexico", "EWA": "Australia", "EWC": "Canada",
-    "VNQ": "REIT", "IYR": "Real Estate 2",
-    "GDX": "Gold Miners", "GDXJ": "Jr Gold Miners",
-    "XOP": "Oil & Gas E&P", "OIH": "Oil Services",
-    "IBB": "Biotech", "XBI": "Biotech 2",
-    "KRE": "Regional Banks", "KBE": "Banks",
-    "JETS": "Airlines", "AWAY": "Travel",
-    "ARKX": "Space Exploration", "UFO": "Space",
-}
+for i, ticker in enumerate(TICKERS, start=1):
+    print(f"[{i:03d}/{len(TICKERS)}] Scanning {ticker}...", end="\r")
 
-def get_etf_universe():
-    rows = [{"Ticker": k, "Company": v, "Sector": "ETF", "SubIndustry": "Public ETF"}
-            for k, v in ETF_UNIVERSE.items()]
-    return pd.DataFrame(rows)
-
-
-def get_nyse_listed():
-    """Fetch NYSE-listed common stocks from NASDAQ trader file."""
-    url = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        lines = r.text.splitlines()
-        rows = [line.split("|") for line in lines if "|" in line]
-        if len(rows) < 2:
-            return pd.DataFrame()
-        df = pd.DataFrame(rows[1:], columns=rows[0])
-        df = df[df.get("ACT Symbol", pd.Series(dtype=str)).astype(str) != "File Creation Time"]
-        df = df[df.get("ETF", "N") == "N"] if "ETF" in df.columns else df
-        # Keep only NYSE and NYSE ARCA
-        if "Exchange" in df.columns:
-            df = df[df["Exchange"].isin(["N", "A", "P"])]
-        sym_col = "ACT Symbol" if "ACT Symbol" in df.columns else "Symbol"
-        name_col = "Security Name" if "Security Name" in df.columns else "Company Name"
-        if sym_col not in df.columns:
-            return pd.DataFrame()
-        df["Ticker"] = normalize_ticker_series(df[sym_col])
-        df["Company"] = df[name_col] if name_col in df.columns else ""
-        df["Sector"] = ""
-        df["SubIndustry"] = ""
-        return df[["Ticker", "Company", "Sector", "SubIndustry"]].dropna(subset=["Ticker"]).reset_index(drop=True)
-    except Exception as e:
-        print(f"  [WARN] NYSE fetch failed: {e}")
-        return pd.DataFrame()
-
-
-def build_full_us_universe():
-    """
-    Builds 4 exchange universes + ETF universe.
-    Returns dict: {exchange_code -> DataFrame}
-    """
-    universes = {}
-
-    print("  Fetching S&P 500...")
-    try:
-        universes["SP500"] = get_sp500_constituents()
-        print(f"    SP500: {len(universes['SP500'])} tickers")
-    except Exception as e:
-        print(f"    SP500 failed: {e}")
-        universes["SP500"] = pd.DataFrame()
-
-    print("  Fetching NASDAQ (broad)...")
-    try:
-        nasdaq_raw = get_nasdaq_listed_common()
-        universes["NASDAQ"] = nasdaq_raw
-        print(f"    NASDAQ: {len(universes['NASDAQ'])} tickers")
-    except Exception as e:
-        print(f"    NASDAQ failed: {e}")
-        universes["NASDAQ"] = pd.DataFrame()
-
-    print("  Fetching Russell 2000 proxy (S&P 600)...")
-    try:
-        universes["RUSSELL"] = get_sp600_constituents()
-        print(f"    RUSSELL: {len(universes['RUSSELL'])} tickers")
-    except Exception as e:
-        print(f"    RUSSELL failed: {e}")
-        universes["RUSSELL"] = pd.DataFrame()
-
-    print("  Fetching Dow 30 + NYSE...")
-    try:
-        dow = get_dow30_constituents()
-        nyse = get_nyse_listed()
-        universes["DOW_NYSE"] = pd.concat([dow, nyse], ignore_index=True).drop_duplicates(subset=["Ticker"])
-        print(f"    DOW_NYSE: {len(universes['DOW_NYSE'])} tickers")
-    except Exception as e:
-        print(f"    DOW_NYSE failed: {e}")
-        universes["DOW_NYSE"] = pd.DataFrame()
-
-    print("  Building ETF universe...")
-    universes["ETF"] = get_etf_universe()
-    print(f"    ETF: {len(universes['ETF'])} tickers")
-
-    return universes
-
-
-def _scan_single_ticker(tkr, universe_df):
-    """Run all timeframe downloads + EW screens for a single ticker.
-    Same logic as the original sequential loop body, extracted so it
-    can be executed concurrently (I/O-bound network calls)."""
-    meta_m = universe_df.loc[universe_df["Ticker"] == tkr]
-    if meta_m.empty:
-        cpy, sec, sub = "", "", ""
+    meta_match = universe_meta.loc[universe_meta["Ticker"] == ticker]
+    if meta_match.empty:
+        company = ""
+        sector = ""
+        subindustry = ""
     else:
-        row = meta_m.iloc[0]
-        cpy  = row.get("Company", "")
-        sec  = row.get("Sector", "")
-        sub  = row.get("SubIndustry", "")
+        meta_row = meta_match.iloc[0]
+        company = meta_row.get("Company", "")
+        sector = meta_row.get("Sector", "")
+        subindustry = meta_row.get("SubIndustry", "")
 
-    rl = rm = rs = rmn = None
     try:
-        fund_status = get_fundamental_status_with_history(tkr)
+        df_l = download_data(ticker, 365 * 5, interval="1wk")
+        r_l = ew_screen(df_l, "long")
+        if r_l:
+            r_l["Ticker"] = ticker
+            r_l["Company"] = company
+            r_l["Sector"] = sector
+            r_l["SubIndustry"] = subindustry
+            results_lt.append(r_l)
 
-        dfl  = download_data(tkr, 365 * 5, interval="1wk")
-        rl   = ew_screen(dfl, "long")
-        if rl:
-            rl.update({"Ticker": tkr, "Company": cpy, "Sector": sec, "SubIndustry": sub, "Fundamentally strong": fund_status})
+        df_m = download_data(ticker, 365, interval="1d")
+        r_m = ew_screen(df_m, "mid")
+        if r_m:
+            r_m["Ticker"] = ticker
+            r_m["Company"] = company
+            r_m["Sector"] = sector
+            r_m["SubIndustry"] = subindustry
+            results_mt.append(r_m)
 
-        dfm  = download_data(tkr, 365, interval="1d")
-        rm   = ew_screen(dfm, "mid")
-        if rm:
-            rm.update({"Ticker": tkr, "Company": cpy, "Sector": sec, "SubIndustry": sub, "Fundamentally strong": fund_status})
+        df_s = download_data(ticker, 90, interval="1d")
+        r_s = ew_screen(df_s, "short")
+        if r_s:
+            r_s["Ticker"] = ticker
+            r_s["Company"] = company
+            r_s["Sector"] = sector
+            r_s["SubIndustry"] = subindustry
+            results_st.append(r_s)
 
-        dfs  = download_data(tkr, 90, interval="1d")
-        rs   = ew_screen(dfs, "short")
-        if rs:
-            rs.update({"Ticker": tkr, "Company": cpy, "Sector": sec, "SubIndustry": sub, "Fundamentally strong": fund_status})
-
-        dfmn = download_data_monthly(tkr, years=10)
-        rmn  = ew_screen(dfmn, "long")
-        if rmn:
-            rmn.update({"Ticker": tkr, "Company": cpy, "Sector": sec, "SubIndustry": sub, "Timeframe": "Monthly", "Fundamentally strong": fund_status})
-    except Exception:
-        pass
-
-    return tkr, rl, rm, rs, rmn
-
-
-def run_scan_for_universe(universe_df, universe_label, max_workers=8):
-    """Run the full EW scan for a given universe DataFrame.
-    Uses a thread pool to parallelize the network-bound per-ticker
-    downloads (yfinance/requests), since these calls release the GIL
-    while waiting on I/O. All per-ticker computation logic (download
-    windows, EW screening, field mapping) is unchanged from the
-    original sequential version."""
-    tickers_list = universe_df["Ticker"].dropna().unique().tolist()
-
-    r_lt_u, r_mt_u, r_st_u, r_mn_u = [], [], [], []
-
-    print(f"\n{'=' * 72}")
-    print(f"SCANNING {universe_label.upper()} ({len(tickers_list)} tickers)")
-    print(f"{'=' * 72}")
-
-    done_count = 0
-    total = len(tickers_list)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_scan_single_ticker, tkr, universe_df): tkr for tkr in tickers_list}
-        for future in as_completed(futures):
-            tkr = futures[future]
-            done_count += 1
-            print(f"  [{done_count:04d}/{total}] {tkr}...", end="\r")
-            try:
-                _, rl, rm, rs, rmn = future.result()
-            except Exception:
-                continue
-            if rl:
-                r_lt_u.append(rl)
-            if rm:
-                r_mt_u.append(rm)
-            if rs:
-                r_st_u.append(rs)
-            if rmn:
-                r_mn_u.append(rmn)
-
-    print(f"  Done: {len(r_lt_u)} LT | {len(r_mt_u)} MT | {len(r_st_u)} ST | {len(r_mn_u)} Monthly")
-    return r_lt_u, r_mt_u, r_st_u, r_mn_u
-
-
-# ════════════════════════════════════════════════════════════════
-
-# ────────────────────────────────────────────────────────────────
-# USER INPUTS — CHANGE ONLY SCRIPT_DIR
-# ────────────────────────────────────────────────────────────────
-
-CUSTOM_UNIVERSE_NAME = "NASDAQ Composite"
-CUSTOM_UNIVERSE_CODE = "NASDAQ_Composite"
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILENAME = os.path.join(SCRIPT_DIR, "Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx")
-
-# Pivot settings
-PIVOT_LEFT_BARS  = 5
-PIVOT_RIGHT_BARS = 5
-PIVOT_NEAR_BARS  = 2
-
-HEADERS = {
-    "User-Agent": "ElliottWaveScreener/1.0 (educational use)"
-}
-
-# Suppress yfinance & pandas warnings
-CUSTOM_TICKERS = []  # not used in this script; kept for compatibility
-
-# ────────────────────────────────────────────────────────────────
-# EXECUTION BLOCK — NASDAQ Composite UNIVERSE
-# ────────────────────────────────────────────────────────────────
-
-UNIVERSE_NAME = CUSTOM_UNIVERSE_NAME
-UNIVERSE_CODE = CUSTOM_UNIVERSE_CODE
-
-print("=" * 72)
-print(f"FETCHING NASDAQ Composite CONSTITUENTS...")
-print("=" * 72)
-
-try:
-    universe_df = get_nasdaq_composite_proxy()
-    print(f"  Loaded {len(universe_df)} tickers from NASDAQ Composite")
-except Exception as _fetch_err:
-    print(f"  [ERROR] Could not fetch NASDAQ Composite constituents: {_fetch_err}")
-    universe_df = pd.DataFrame(columns=["Ticker","Company","Sector","SubIndustry"])
-
-print("=" * 72)
-print(f"SCANNING {UNIVERSE_NAME} ({len(universe_df)} tickers)")
-print("=" * 72)
-
-results_lt, results_mt, results_st, results_mn = run_scan_for_universe(
-    universe_df, UNIVERSE_NAME, max_workers=16
-)
-
-TICKERS = universe_df["Ticker"].tolist()
+    except Exception as e:
+        print(f"\nSkip {ticker}: {e}")
 
 print("\nScan complete.")
-print(f"  Long-Term results  : {len(results_lt)}")
-print(f"  Mid-Term  results  : {len(results_mt)}")
-print(f"  Short-Term results : {len(results_st)}")
-print(f"  Monthly results    : {len(results_mn)}")
-
 
 
 # ────────────────────────────────────────────────────────────────
 # BUILD DATAFRAMES
 # ────────────────────────────────────────────────────────────────
 col_order = [
-    "Ticker","Company","Sector","SubIndustry","Fundamentally strong",
+    "Ticker","Company","Sector","SubIndustry",
     "EW_Score","Trade_Quality","Elliott_State","Current_Price",
     "Current_Wave_Target","Ideal_Entry_Price","Pullback_Buy_Zone",
     "Stop_Loss","Invalidation_Level","Extension_Target","If_Extended_Then",
@@ -1986,198 +1062,8 @@ col_order = [
     "Recommended_Action","Hold_Period","Risk_Management",
     "Rule1_Wave2_OK","W4_Overlap_Risk",
     "Pivot_Low","Pivot_Low_Date","Pivot_Low_Price","Pivot_Low_Bars_Ago",
-    "Pivot_High","Pivot_High_Date","Pivot_High_Price","Pivot_High_Bars_Ago",
-    "State_Duration_Bars","State_Duration_Human",
-    "Next_EW_State","Next_State_ETA_Bars","Next_State_ETA_Human",
-    "Transition_Trigger",
-    "Wave_Degree",
-    "Corrective_Pattern",
-    "Diagonal_Triangle",
-    "Channel_Base",
-    "Channel_Top",
-    "W5_Channel_Target",
-    "Wave_Duration_Bars",
-    "Wave_End_Est_Bars",
-    "Wave_End_Est_Date",
-    "Wave_End_Est_Price",
-    "Next_Wave_Start_Est",
-    "Fib_Time_Ratio"
+    "Pivot_High","Pivot_High_Date","Pivot_High_Price","Pivot_High_Bars_Ago"
 ]
-
-
-# ════════════════════════════════════════════════════════════════
-# MULTI-TIMEFRAME ALIGNMENT — Helper + Builder
-# ════════════════════════════════════════════════════════════════
-
-def multi_tf_alignment_score(mn_state, lt_state, mt_state, st_state):
-    mn = str(mn_state).upper()
-    lt = str(lt_state).upper()
-    mt = str(mt_state).upper()
-    st = str(st_state).upper()
-
-    # Hard conflict: monthly or weekly is bearish
-    if any(x in mn for x in ["BEAR MARKET", "BLOWOFF", "B-WAVE TRAP"]):
-        return "MONTHLY CONFLICT - SKIP"
-    if any(x in lt for x in ["BEAR MARKET", "BLOWOFF", "B-WAVE TRAP"]):
-        return "HIGHER TF CONFLICT - SKIP"
-
-    # PLATINUM: All 4 aligned at bottom
-    if (any(x in mn for x in ["CAPITULATION", "ACCUMULATION"]) and
-        any(x in lt for x in ["CAPITULATION", "ACCUMULATION", "WAVE 2"]) and
-        any(x in mt for x in ["ACCUMULATION", "WATCH LIST", "WAVE 2"]) and
-        any(x in st for x in ["SETUP FORMING", "WAVE 3 BREAKOUT", "WAVE 2", "BREAKOUT", "3RD OF 3RD"])):
-        return "PLATINUM - Monthly+Weekly+Daily Bottom Aligned"
-
-    # GOLD: Monthly+Weekly aligned, Daily confirming
-    if (any(x in mn for x in ["WAVE 2", "WAVE 3", "ACCUMULATION"]) and
-        any(x in lt for x in ["CAPITULATION", "ACCUMULATION", "WAVE 2", "WAVE 3"]) and
-        any(x in mt for x in ["WAVE 2", "WAVE 3 STARTING", "WATCH LIST", "WAVE 3 ACTIVE"]) and
-        any(x in st for x in ["WAVE 3 BREAKOUT", "SETUP FORMING", "WAVE 3 ACTIVE", "RIDE IT", "3RD OF 3RD"])):
-        return "GOLD - Monthly+Weekly Aligned, Daily Confirming"
-
-    # SILVER: Monthly+Daily aligned (Weekly may lag)
-    if (any(x in mn for x in ["WAVE 2", "WAVE 3", "ACCUMULATION"]) and
-        any(x in mt for x in ["WAVE 2", "WAVE 3 STARTING", "WAVE 3 ACTIVE"]) and
-        any(x in st for x in ["WAVE 3 BREAKOUT", "3RD OF 3RD", "RIDE IT"])):
-        return "SILVER - Monthly+Daily Aligned"
-
-    # STRONG: Weekly+Daily aligned (no monthly conflict)
-    if (any(x in lt for x in ["WAVE 2", "WAVE 3", "ACCUMULATION"]) and
-        any(x in mt for x in ["WAVE 2", "WAVE 3 STARTING", "WATCH LIST", "WAVE 3 ACTIVE"]) and
-        any(x in st for x in ["WAVE 3 BREAKOUT", "SETUP FORMING", "WAVE 3 ACTIVE", "RIDE IT", "3RD OF 3RD"])):
-        return "STRONG - Weekly+Daily Aligned, No Conflict"
-
-    if (any(x in lt for x in ["WAVE 3"]) and
-        any(x in mt for x in ["WAVE 3"]) and
-        any(x in st for x in ["WAVE 3", "BREAKOUT", "RIDE", "3RD OF 3RD"])):
-        return "GOOD - All 3 TF in Wave 3"
-
-    if any(x in st for x in ["WAVE 5", "BLOWOFF"]):
-        return "LATE - Short-term extended, reduce size"
-
-    return "NEUTRAL - Wait for better alignment"
-
-
-def build_multi_tf_sheet(df_monthly, df_long, df_mid, df_short):
-    dfs = [df_monthly, df_long, df_mid, df_short]
-    if any(d is None or d.empty for d in dfs):
-        # Try without monthly if not available
-        if df_long is None or df_long.empty or df_mid is None or df_mid.empty or df_short is None or df_short.empty:
-            return pd.DataFrame()
-
-    # Base from df_long
-    base_cols_lt = [c for c in [
-        "Ticker", "Company", "Sector", "SubIndustry",
-        "Elliott_State", "EW_Score", "Trade_Quality", "Current_Price",
-        "Ideal_Entry_Price", "Stop_Loss", "Extension_Target",
-        "Recommended_Action", "Hold_Period", "Risk_Management"
-    ] if c in df_long.columns]
-
-    merged = df_long[base_cols_lt].copy()
-    merged = merged.rename(columns={
-        "Elliott_State":      "LT_State",
-        "EW_Score":           "LT_Score",
-        "Trade_Quality":      "LT_Quality",
-        "Ideal_Entry_Price":  "LT_Entry",
-        "Stop_Loss":          "LT_Stop",
-        "Recommended_Action": "LT_Action",
-        "Hold_Period":        "LT_Hold",
-        "Risk_Management":    "LT_Risk",
-    })
-
-    # Monthly
-    has_monthly = df_monthly is not None and not df_monthly.empty
-    if has_monthly:
-        mn_pick = [c for c in ["Ticker", "Elliott_State", "EW_Score", "Trade_Quality"] if c in df_monthly.columns]
-        mn_cols = df_monthly[mn_pick].copy()
-        mn_cols = mn_cols.rename(columns={
-            "Elliott_State": "MN_State",
-            "EW_Score":      "MN_Score",
-            "Trade_Quality": "MN_Quality",
-        })
-        merged = merged.merge(mn_cols, on="Ticker", how="left")
-        merged["MN_State"]   = merged.get("MN_State",   "N/A").fillna("N/A")
-        merged["MN_Score"]   = merged.get("MN_Score",   0).fillna(0)
-        merged["MN_Quality"] = merged.get("MN_Quality", "N/A").fillna("N/A")
-    else:
-        merged["MN_State"]   = "N/A"
-        merged["MN_Score"]   = 0
-        merged["MN_Quality"] = "N/A"
-
-    mt_pick = [c for c in [
-        "Ticker", "Elliott_State", "EW_Score", "Trade_Quality",
-        "Ideal_Entry_Price", "Stop_Loss", "Recommended_Action", "Hold_Period"
-    ] if c in df_mid.columns]
-    mt_cols = df_mid[mt_pick].copy()
-    mt_cols = mt_cols.rename(columns={
-        "Elliott_State":      "MT_State",
-        "EW_Score":           "MT_Score",
-        "Trade_Quality":      "MT_Quality",
-        "Ideal_Entry_Price":  "MT_Entry",
-        "Stop_Loss":          "MT_Stop",
-        "Recommended_Action": "MT_Action",
-        "Hold_Period":        "MT_Hold",
-    })
-
-    st_pick = [c for c in [
-        "Ticker", "Elliott_State", "EW_Score", "Trade_Quality",
-        "Recommended_Action", "Hold_Period"
-    ] if c in df_short.columns]
-    st_cols = df_short[st_pick].copy()
-    st_cols = st_cols.rename(columns={
-        "Elliott_State":      "ST_State",
-        "EW_Score":           "ST_Score",
-        "Trade_Quality":      "ST_Quality",
-        "Recommended_Action": "ST_Action",
-        "Hold_Period":        "ST_Hold",
-    })
-
-    merged = merged.merge(mt_cols, on="Ticker", how="inner")
-    merged = merged.merge(st_cols, on="Ticker", how="inner")
-
-    merged["Alignment_Type"] = merged.apply(
-        lambda r: multi_tf_alignment_score(
-            r.get("MN_State", "N/A"),
-            r["LT_State"],
-            r["MT_State"],
-            r["ST_State"]
-        ),
-        axis=1
-    )
-
-    merged["Combined_Score"] = (
-        merged["MN_Score"] * 0.2 +
-        merged["LT_Score"] * 0.35 +
-        merged["MT_Score"] * 0.25 +
-        merged["ST_Score"] * 0.2
-    ).round(1)
-
-    _order = {
-        "PLATINUM - Monthly+Weekly+Daily Bottom Aligned":   0,
-        "GOLD - Monthly+Weekly Aligned, Daily Confirming":  1,
-        "SILVER - Monthly+Daily Aligned":                   2,
-        "STRONG - Weekly+Daily Aligned, No Conflict":       3,
-        "GOOD - All 3 TF in Wave 3":                        4,
-        "NEUTRAL - Wait for better alignment":              5,
-        "LATE - Short-term extended, reduce size":          6,
-        "HIGHER TF CONFLICT - SKIP":                        7,
-        "MONTHLY CONFLICT - SKIP":                          8,
-    }
-    merged["_sort"] = merged["Alignment_Type"].map(_order).fillna(99)
-    merged = merged.sort_values(["_sort", "Combined_Score"], ascending=[True, False])
-    merged = merged.drop(columns=["_sort"])
-
-    final_cols = [c for c in [
-        "Ticker", "Company", "Sector", "SubIndustry",
-        "Alignment_Type", "Combined_Score", "Current_Price",
-        "MN_State", "MN_Score", "MN_Quality",
-        "LT_State", "LT_Score", "LT_Quality", "LT_Entry", "LT_Stop", "LT_Action", "LT_Hold", "LT_Risk",
-        "MT_State", "MT_Score", "MT_Quality", "MT_Entry", "MT_Stop", "MT_Action", "MT_Hold",
-        "ST_State", "ST_Score", "ST_Quality", "ST_Action", "ST_Hold",
-        "Extension_Target"
-    ] if c in merged.columns]
-
-    return merged[final_cols].reset_index(drop=True)
 
 df_long = pd.DataFrame(results_lt)
 df_mid = pd.DataFrame(results_mt)
@@ -2355,16 +1241,6 @@ else:
     df_all_bull = pd.DataFrame()
 
 
-# Monthly timeframe DataFrame
-df_monthly = pd.DataFrame(results_mn)
-if not df_monthly.empty and "EW_Score" in df_monthly.columns:
-    mn_col_order = [c for c in col_order if c in df_monthly.columns]
-    df_monthly = df_monthly[mn_col_order].sort_values("EW_Score", ascending=False).reset_index(drop=True)
-
-# Multi-timeframe alignment sheet
-df_multi_tf = build_multi_tf_sheet(df_monthly, df_long, df_mid, df_short)
-
-
 # ────────────────────────────────────────────────────────────────
 # BUY LIST BUILDERS
 # ────────────────────────────────────────────────────────────────
@@ -2443,7 +1319,7 @@ def build_buy_list(df, timeframe_label):
     out["Timeframe"] = timeframe_label
 
     preferred_cols = [
-        "Ticker","Company","Sector","SubIndustry","Fundamentally strong","Timeframe",
+        "Ticker","Company","Sector","SubIndustry","Timeframe",
         "Tomorrow_Buy_Rank","EW_Score","Trade_Quality","Elliott_State",
         "Current_Price","Ideal_Entry_Price","Pct_to_Ideal_Entry",
         "Pullback_Buy_Zone","Stop_Loss","Pct_to_Stop",
@@ -2759,12 +1635,6 @@ def add_sheet_to_workbook(wb, df, sheet_name, theme_color, title_text):
         "Pivot_High_Date": 14,
         "Pivot_High_Price": 14,
         "Pivot_High_Bars_Ago": 16,
-        "State_Duration_Bars": 18,
-        "State_Duration_Human": 22,
-        "Next_EW_State": 36,
-        "Next_State_ETA_Bars": 18,
-        "Next_State_ETA_Human": 22,
-        "Transition_Trigger": 48,
 
         "Triple_Bull_Score": 14,
         "Alignment_Type": 22,
@@ -2794,7 +1664,7 @@ def add_sheet_to_workbook(wb, df, sheet_name, theme_color, title_text):
 # SAVE WORKBOOK
 # ────────────────────────────────────────────────────────────────
 def save_master_workbook(
-    df_long, df_mid, df_short, df_all_bull, df_multi_tf, df_monthly,
+    df_long, df_mid, df_short, df_all_bull,
     df_long_buys, df_mid_buys, df_short_buys, df_tomorrow_buys,
     filename="Elliott_Wave_SP500_Master_Workbook.xlsx"
 ):
@@ -2837,60 +1707,19 @@ def save_master_workbook(
         wb, df_all_bull, "All_3_Bullish", "004D40",
         f"ELLIOTT WAVE — ALL 3 TIMEFRAMES BULLISH | {UNIVERSE_NAME}"
     )
-    add_sheet_to_workbook(
-        wb, df_monthly, "Monthly_EW", "37474F",
-        f"ELLIOTT WAVE — MONTHLY SUPER-CYCLE SCREENER | {UNIVERSE_NAME} | Monthly 10yr"
-    )
-    add_sheet_to_workbook(
-        wb, df_multi_tf, "Multi_TF_Alignment", "1A237E",
-        f"MULTI-TIMEFRAME ALIGNMENT | {UNIVERSE_NAME} | Monthly+Weekly+Daily"
-    )
 
-    if "df_backtest" in dir() and not df_backtest.empty and "Message" not in df_backtest.columns:
-        add_sheet_to_workbook(wb, df_backtest, "Backtest_Results", "4A148C",
-            f"ELLIOTT WAVE — BACKTEST RESULTS | {UNIVERSE_NAME}")
-    try:
-        wb.save(filename)               
-        print(f"\nSaved workbook: {filename}")
-    except Exception as e:
-        print(f"\n[CRITICAL ERROR] Failed to save Excel file to disk: {e}")                
+    wb.save(filename)
+    print(f"\nSaved workbook: {filename}")
 
 
 # ────────────────────────────────────────────────────────────────
 # FINAL SAVE
 # ────────────────────────────────────────────────────────────────
-# ────────────────────────────────────────────────────────────────
-
-# BACKTEST MODULE — Walk-Forward Signal Quality
-# ────────────────────────────────────────────────────────────────
-ENABLE_BACKTEST = False   # Set False to skip (adds ~30s per ticker)
-BACKTEST_FWD_BARS = 20
-BACKTEST_WINDOWS  = 6
-
-if ENABLE_BACKTEST:
-    print("\nRunning walk-forward backtest...")
-    df_backtest = run_backtest_summary(
-        TICKERS,
-        horizon="long",
-        lookback_windows=BACKTEST_WINDOWS,
-        fwd_bars=BACKTEST_FWD_BARS
-    )
-    if not df_backtest.empty:
-        buy_signals = df_backtest[df_backtest["Is_Buy_Signal"] == True]
-        hit_rate = (buy_signals["Hit"] == "✅").mean() * 100 if len(buy_signals) else 0
-        print(f"Backtest done: {len(df_backtest)} signals | Buy hit rate: {hit_rate:.1f}%")
-    else:
-        df_backtest = pd.DataFrame({"Message": ["No backtest data"]})
-else:
-    df_backtest = pd.DataFrame({"Message": ["Backtest disabled"]})
-
 save_master_workbook(
     df_long=df_long,
     df_mid=df_mid,
     df_short=df_short,
     df_all_bull=df_all_bull,
-    df_multi_tf=df_multi_tf,
-    df_monthly=df_monthly,
     df_long_buys=df_long_buys,
     df_mid_buys=df_mid_buys,
     df_short_buys=df_short_buys,
@@ -2900,4 +1729,4 @@ save_master_workbook(
 
 print("\nDone.")
 print(f"Workbook created: {OUTPUT_FILENAME}")
-print("Tabs: Cheat_Sheet | Tomorrow_Buys | LongTerm_Buys | MidTerm_Buys | ShortTerm_Buys | LongTerm | MidTerm | ShortTerm | All_3_Bullish | Monthly_EW | Multi_TF_Alignment")
+print("Tabs: Cheat_Sheet | Tomorrow_Buys | LongTerm_Buys | MidTerm_Buys | ShortTerm_Buys | LongTerm | MidTerm | ShortTerm | All_3_Bullish")
