@@ -33,6 +33,7 @@ def load_workbook():
             df2 = df.copy()
             df2.columns = df2.iloc[1] if df2.shape[0] > 1 else df2.columns
             df2 = df2.iloc[2:].reset_index(drop=True)
+            df2.columns = dedupe_columns(df2.columns)
             cleaned[name] = df2
         except Exception:
             cleaned[name] = df
