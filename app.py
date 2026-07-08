@@ -104,10 +104,201 @@ def score_bg(val):
 
 
 def state_bg(val):
-    s = str(val).upper()
+    s = str(val).upper().strip()
     if not s or s == "NAN":
         return None
     if "3RD OF 3RD" in s or "EXPLOSIVE" in s:
         return "#00E5FF", "black"
     if "WAVE 3" in s or "BREAKOUT" in s:
-        return "#00C853", "white
+        return "#00C853", "white"
+    if "WAVE 2" in s or "BUY ZONE" in s:
+        return "#FF9800", "black"
+    if "ACCUMULATION" in s or "CAPITULATION" in s:
+        return "#B9F6CA", "black"
+    if "TRIANGLE" in s:
+        return "#B0BEC5", "black"
+    if any(x in s for x in ["BEAR", "EXIT", "TRAP", "BLOWOFF"]):
+        return "#EF5350", "white"
+    return "#ECEFF1", "black"
+
+
+def action_bg(val):
+    s = str(val).upper().strip()
+    if not s or s == "NAN":
+        return None
+    if any(x in s for x in ["BUY", "LONG", "HOLD", "ADD", "BUILD"]):
+        return "#00C853", "white"
+    if any(x in s for x in ["EXIT", "AVOID", "SELL", "TRIM", "SHORT", "REDUCE"]):
+        return "#EF5350", "white"
+    return "#FFD600", "black"
+
+
+SCORE_KEYWORDS = ["score", "rank"]
+STATE_KEYWORDS = ["state"]
+ACTION_KEYWORDS = ["action"]
+
+
+def classify_column(col_name):
+    c = str(col_name).lower()
+    if any(k in c for k in SCORE_KEYWORDS):
+        return "score"
+    if any(k in c for k in STATE_KEYWORDS):
+        return "state"
+    if any(k in c for k in ACTION_KEYWORDS):
+        return "action"
+    return None
+
+
+def cell_style(col_type, val):
+    if col_type == "score":
+        r = score_bg(val)
+    elif col_type == "state":
+        r = state_bg(val)
+    elif col_type == "action":
+        r = action_bg(val)
+    else:
+        r = None
+    if r is None:
+        return ""
+    bg, fg = r
+    return f"background-color:{bg}; color:{fg}; font-weight:600;"
+
+
+def render_html_table(df):
+    cols = list(df.columns)
+    col_types = {c: classify_column(c) for c in cols}
+    html = ['<div class="ew-scroll"><table class="ew-table"><thead><tr>']
+    for c in cols:
+        html.append(f"<th>{c}</th>")
+    html.append("</tr></thead><tbody>")
+    for _, row in df.iterrows():
+        html.append("<tr>")
+        for c in cols:
+            val = row[c]
+            style = cell_style(col_types[c], val)
+            html.append(f'<td style="{style}">{val}</td>')
+        html.append("</tr>")
+    html.append("</tbody></table></div>")
+    return "".join(html)
+
+
+def apply_excel_style_filters(df, key_prefix):
+    filtered = df.copy()
+    with st.expander("🔎 Filters (click to expand)", expanded=False):
+        cols_per_row = 4
+        col_list = list(df.columns)
+        for i in range(0, len(col_list), cols_per_row):
+            row_cols = st.columns(cols_per_row)
+            for j, col_name in enumerate(col_list[i:i + cols_per_row]):
+                with row_cols[j]:
+                    series = filtered[col_name]
+                    nunique = series.nunique(dropna=True)
+
+                    numeric_series = pd.to_numeric(series, errors="coerce")
+                    is_numeric = numeric_series.notna().sum() >= max(1, int(len(series) * 0.7))
+
+                    if is_numeric and nunique > 15:
+                        valid = numeric_series.dropna()
+                        if not valid.empty:
+                            lo, hi = float(valid.min()), float(valid.max())
+                            if lo < hi:
+                                sel = st.slider(
+                                    col_name, min_value=lo, max_value=hi,
+                                    value=(lo, hi), key=f"{key_prefix}_{col_name}_slider"
+                                )
+                                mask = numeric_series.between(sel[0], sel[1]) | series.isna()
+                                filtered = filtered[mask]
+                    elif 0 < nunique <= 40:
+                        options = sorted(series.dropna().astype(str).unique().tolist())
+                        selected = st.multiselect(
+                            col_name, options, default=options,
+                            key=f"{key_prefix}_{col_name}_multi"
+                        )
+                        if selected and len(selected) < len(options):
+                            filtered = filtered[series.astype(str).isin(selected)]
+                    else:
+                        text = st.text_input(
+                            f"{col_name} contains", key=f"{key_prefix}_{col_name}_text"
+                        )
+                        if text:
+                            filtered = filtered[series.astype(str).str.contains(text, case=False, na=False)]
+    return filtered
+
+
+sheets_dict, last_updated = load_workbook()
+
+if last_updated:
+    st.caption(f"Last data refresh: {last_updated:%Y-%m-%d %H:%M} (auto-updated every few hours by GitHub Actions)")
+
+if st.button("🔄 Reload page data"):
+    st.cache_data.clear()
+    st.rerun()
+
+(main_tab,) = st.tabs(["Nasdaq_Composite"])
+
+with main_tab:
+    if not sheets_dict:
+        st.warning(
+            "No results file found yet. The scheduled GitHub Action may not have "
+            "run yet, or the workbook filename doesn't match. Check the Actions tab "
+            "in your repo, or run the workflow manually (workflow_dispatch)."
+        )
+    else:
+        tab_names = list(sheets_dict.keys())
+        tabs = st.tabs(tab_names)
+
+        for tab, name in zip(tabs, tab_names):
+            with tab:
+                df = sheets_dict[name]
+
+                if df is None or df.empty:
+                    st.info(f"No rows available for {name}.")
+                    continue
+
+                quick_search = st.text_input(
+                    f"Quick search across all columns ({name})",
+                    key=f"quick_{name}"
+                )
+                view = df
+                if quick_search:
+                    mask = df.apply(
+                        lambda col: col.astype(str).str.contains(quick_search, case=False, na=False)
+                    )
+                    view = df[mask.any(axis=1)]
+
+                view = apply_excel_style_filters(view, key_prefix=name)
+
+                sort_cols = ["(none)"] + list(view.columns)
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    sort_col = st.selectbox("Sort by", sort_cols, key=f"sortcol_{name}")
+                with c2:
+                    sort_dir = st.radio("Order", ["Desc", "Asc"], horizontal=True, key=f"sortdir_{name}")
+                if sort_col != "(none)":
+                    try:
+                        numeric_try = pd.to_numeric(view[sort_col], errors="coerce")
+                        if numeric_try.notna().sum() >= max(1, int(len(view) * 0.7)):
+                            view = view.assign(_sortval=numeric_try).sort_values(
+                                "_sortval", ascending=(sort_dir == "Asc")
+                            ).drop(columns="_sortval")
+                        else:
+                            view = view.sort_values(sort_col, ascending=(sort_dir == "Asc"))
+                    except Exception:
+                        pass
+
+                st.caption(f"Showing {len(view)} of {len(df)} rows")
+
+                MAX_ROWS = 500
+                display_view = view.head(MAX_ROWS)
+                if len(view) > MAX_ROWS:
+                    st.info(f"Displaying first {MAX_ROWS} rows. Use filters above to narrow results, or download full CSV below.")
+
+                st.markdown(render_html_table(display_view), unsafe_allow_html=True)
+
+                st.download_button(
+                    f"Download {name} as CSV (all {len(view)} filtered rows)",
+                    view.to_csv(index=False),
+                    file_name=f"{name}.csv",
+                    mime="text/csv",
+                    key=f"dl_{name}"
+                )
