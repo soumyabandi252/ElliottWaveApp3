@@ -42,10 +42,8 @@ def load_workbook():
     cleaned = {}
     for name, df in sheets.items():
         try:
-            # Clean up completely empty rows/cols that might offset the headers
             df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
             
-            # Robust header detection: if pandas assigned 'Unnamed', real headers are likely a row down
             if any('Unnamed' in str(c) for c in df.columns[:3]):
                 for i in range(min(5, len(df))):
                     if df.iloc[i].notna().sum() > len(df.columns) / 2:
@@ -96,27 +94,26 @@ STATE_KEYWORDS = ["state"]
 ACTION_KEYWORDS = ["action", "signal", "recommendation"]
 
 def style_dataframe(df):
-    """Applies Pandas Styler element-wise to avoid Streamlit API Exceptions"""
+    """Applies Pandas Styler element-wise safely for Streamlit"""
     styler = df.style
     
-    # Handle pandas version differences gracefully (applymap deprecated in favor of map in newer pandas)
+    # Must use empty string "" instead of None to prevent StreamlitAPIException
     map_func = getattr(styler, "map", getattr(styler, "applymap", None))
     
     for col in df.columns:
         c_lower = str(col).lower()
         if any(k in c_lower for k in SCORE_KEYWORDS):
-            map_func(lambda v: f"background-color: {score_bg(v)[0]}; color: {score_bg(v)[1]};" if score_bg(v) else None, subset=[col])
+            map_func(lambda v: f"background-color: {score_bg(v)[0]}; color: {score_bg(v)[1]};" if score_bg(v) else "", subset=[col])
         elif any(k in c_lower for k in STATE_KEYWORDS):
-            map_func(lambda v: f"background-color: {state_bg(v)[0]}; color: {state_bg(v)[1]};" if state_bg(v) else None, subset=[col])
+            map_func(lambda v: f"background-color: {state_bg(v)[0]}; color: {state_bg(v)[1]};" if state_bg(v) else "", subset=[col])
         elif any(k in c_lower for k in ACTION_KEYWORDS):
-            map_func(lambda v: f"background-color: {action_bg(v)[0]}; color: {action_bg(v)[1]};" if action_bg(v) else None, subset=[col])
+            map_func(lambda v: f"background-color: {action_bg(v)[0]}; color: {action_bg(v)[1]};" if action_bg(v) else "", subset=[col])
             
     return styler
 
 def apply_excel_style_filters(df, key_prefix):
     filtered = df.copy()
     with st.expander("🔎 Global Filters & Search", expanded=False):
-        # Quick Search
         quick_search = st.text_input(f"Global Search ({key_prefix})", key=f"quick_{key_prefix}", placeholder="Type to search across all columns...")
         if quick_search:
             mask = filtered.apply(lambda col: col.astype(str).str.contains(quick_search, case=False, na=False))
@@ -149,6 +146,7 @@ def apply_excel_style_filters(df, key_prefix):
                         if selected and len(selected) < len(options):
                             filtered = filtered[series.astype(str).isin(selected)]
     return filtered
+
 
 # --- Main App Execution ---
 sheets_dict, last_updated = load_workbook()
@@ -199,7 +197,7 @@ else:
             # Create Pandas Style object for coloring
             styled_df = style_dataframe(view)
 
-            # Native, paginated Streamlit DataFrame with freeze pane and styling
+            # Native, paginated Streamlit DataFrame
             st.dataframe(
                 styled_df,
                 use_container_width=True,
