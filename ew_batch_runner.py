@@ -3,6 +3,8 @@ Performance-optimized batch/index runner for the Elliott Wave engine.
 Core Elliott logic is untouched. This layer only optimizes data acquisition,
 index constituent resolution, parallel execution, and output orchestration.
 """
+import requests
+import io
 import os
 import re
 import time
