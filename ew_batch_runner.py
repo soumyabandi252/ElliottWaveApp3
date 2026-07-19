@@ -413,12 +413,37 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     manifest_path = os.path.join(combined_dir, f'INDEX_RUN_MANIFEST_{ts}.csv')
     pd.DataFrame(manifest_rows).to_csv(manifest_path, index=False)
 
-    if combined:
+        if combined:
         combined_df = pd.concat(combined, ignore_index=True)
+        
+        # New Versioning Logic for the Master Workbook
+        import glob
+        
+        base_filename = "Elliott_Wave_NASDAQ_Composite_Master_Workbook"
+        extension = ".xlsx"
+        # Saving directly to root so GitHub Actions can find it easily
+        existing_files = glob.glob(f"{base_filename}*{extension}")
+
+        if not existing_files:
+            new_filename = f"{base_filename}{extension}"
+        else:
+            max_version = 0
+            for f in existing_files:
+                filename_only = os.path.basename(f)
+                match = re.search(r"_v(\d+)\.xlsx$", filename_only)
+                if match:
+                    max_version = max(max_version, int(match.group(1)))
+                elif filename_only == f"{base_filename}{extension}":
+                    max_version = max(max_version, 0)
+            new_filename = f"{base_filename}_v{max_version + 1}{extension}"
+
+        # Save CSV for historical backup and the versioned Master Excel file
         combined_csv = os.path.join(combined_dir, f'ALL_INDEXES_COMBINED_{ts}.csv')
-        combined_xlsx = os.path.join(combined_dir, f'ALL_INDEXES_COMBINED_{ts}.xlsx')
         combined_df.to_csv(combined_csv, index=False)
+        
+        combined_xlsx = new_filename
         ew.write_excel(combined_df, combined_xlsx)
+        print(f"Successfully saved versioned master file: {combined_xlsx}")
     else:
         combined_df = pd.DataFrame()
         combined_csv = None
