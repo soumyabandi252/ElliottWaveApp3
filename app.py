@@ -5,6 +5,9 @@ import os
 import glob
 from datetime import datetime
 
+# INCREASE MAX RENDER ELEMENTS TO FIX STREAMLITAPIEXCEPTION
+pd.set_option("styler.render.max_elements", 9_999_999)
+
 st.set_page_config(page_title="Elliott Wave Screener", layout="wide")
 
 st.title("📈 Elliott Wave Trading Screener")
@@ -97,7 +100,6 @@ def style_dataframe(df):
     """Applies Pandas Styler element-wise safely for Streamlit"""
     styler = df.style
     
-    # Must use empty string "" instead of None to prevent StreamlitAPIException
     map_func = getattr(styler, "map", getattr(styler, "applymap", None))
     
     for col in df.columns:
@@ -172,7 +174,7 @@ else:
                 st.info(f"No rows available for {name}.")
                 continue
                 
-            # Filter columns exactly for the Dashboard
+            # Filter columns exactly for the Dashboard FIRST to reduce elements
             if str(name).strip().lower() == "dashboard":
                 target_columns = [
                     "Symbol", "Price ($)", "Elliott Degree", "Current Wave", 
