@@ -31,4 +31,5 @@ jobs:
           git config --local user.name "GitHub Action"
           git add Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx
           git diff --cached --quiet && echo "No changes to commit" || git commit -m "Auto-update Elliott Wave scan results [skip ci]"
+          git pull --rebase
           git push
