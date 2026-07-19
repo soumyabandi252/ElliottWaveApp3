@@ -135,7 +135,7 @@ def action_bg(val):
 
 SCORE_KEYWORDS = ["score", "rank"]
 STATE_KEYWORDS = ["state"]
-ACTION_KEYWORDS = ["action"]
+ACTION_KEYWORDS = ["action", "signal", "recommendation"]
 
 
 def classify_column(col_name):
@@ -225,6 +225,22 @@ def apply_excel_style_filters(df, key_prefix):
     return filtered
 
 
+def get_default_sorted_view(df):
+    """Sorts dataframe to put Annual Buy and Annual SELL at the top if an 'Action' column exists"""
+    # Look for a column that represents the action/signal
+    action_col = next((col for col in df.columns if classify_column(col) == "action"), None)
+    
+    if action_col:
+        # Create a temporary boolean column to check for target signals
+        is_target_signal = df[action_col].astype(str).str.contains("Annual Buy|Annual SELL", case=False, na=False)
+        
+        # Sort so True values (mapped to False via ~ for ascending sort) come first
+        sorted_df = df.assign(_is_top=~is_target_signal).sort_values('_is_top').drop(columns='_is_top')
+        return sorted_df
+        
+    return df
+
+
 sheets_dict, last_updated = load_workbook()
 
 if last_updated:
@@ -254,6 +270,9 @@ with main_tab:
                 if df is None or df.empty:
                     st.info(f"No rows available for {name}.")
                     continue
+                
+                # Apply the default sorting rule to prioritize Annual Buy/Sell
+                df = get_default_sorted_view(df)
 
                 quick_search = st.text_input(
                     f"Quick search across all columns ({name})",
@@ -274,6 +293,8 @@ with main_tab:
                     sort_col = st.selectbox("Sort by", sort_cols, key=f"sortcol_{name}")
                 with c2:
                     sort_dir = st.radio("Order", ["Desc", "Asc"], horizontal=True, key=f"sortdir_{name}")
+                
+                # Only apply user sorting if they manually select a column
                 if sort_col != "(none)":
                     try:
                         numeric_try = pd.to_numeric(view[sort_col], errors="coerce")
