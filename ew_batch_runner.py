@@ -37,7 +37,7 @@ WIKI_SOURCES = {
     "DOW30": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
     "RUSSELL1000": "https://en.wikipedia.org/wiki/Russell_1000_Index",
     "RUSSELL2000": "https://en.wikipedia.org/wiki/Russell_2000_Index",
-    "SP600": "https://en.wikipedia.org/wiki/S%26P_600",
+     "SP600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
     "SP400": "https://en.wikipedia.org/wiki/S%26P_400",
 }
 
@@ -140,7 +140,8 @@ def get_russell2000_tickers():
         return []
         
 def get_sp600_tickers():
-    return _read_html_table_symbols(WIKI_SOURCES["SP600"], ("Symbol"))
+    # Note the comma after "Symbol"
+    return _read_html_table_symbols(WIKI_SOURCES["SP600"], ("Symbol",))
 
 
 def get_sp400_tickers():
