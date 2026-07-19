@@ -412,7 +412,7 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     os.makedirs(combined_dir, exist_ok=True)
     manifest_path = os.path.join(combined_dir, f'INDEX_RUN_MANIFEST_{ts}.csv')
     pd.DataFrame(manifest_rows).to_csv(manifest_path, index=False)
-        if combined:
+    if combined:
         combined_df = pd.concat(combined, ignore_index=True)
         
         # New Versioning Logic for the Master Workbook
