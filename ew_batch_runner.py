@@ -131,10 +131,6 @@ def get_russell1000_tickers():
     return _read_html_table_symbols(WIKI_SOURCES["RUSSELL1000"], ("Symbol",))
 
 
-def get_russell2000_tickers():
-    return _read_html_table_symbols(WIKI_SOURCES["RUSSELL2000"], ("Ticker"))
-
-
 def get_sp600_tickers():
     return _read_html_table_symbols(WIKI_SOURCES["SP600"], ("Symbol"))
 
