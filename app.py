@@ -177,15 +177,24 @@ else:
             # Filter columns exactly for the Dashboard FIRST to reduce elements
             if str(name).strip().lower() == "dashboard":
                 target_columns = [
-                    "Symbol", "Price ($)", "Elliott Degree", "Current Wave", 
-                    "Wave Personality", "Next Wave Expected", "Alternate Count", 
-                    "Signal (BUY/SELL/WAIT)", "Action Comment", "BUY TFs #", 
-                    "SELL TFs #", "BUY Timeframes Hit", "SELL Timeframes Hit", 
-                    "BUY Timeframes Hit Dates", "SELL Timeframes Hit Dates", 
-                    "Latest BUY Date (any TF)", "BUY Date Timeframe", 
-                    "Latest SELL Date (any TF)", "SELL Date Timeframe", 
-                    "Last Annual BUY Date", "Annual BUY Timeframe", 
-                    "Annual BUY Count (10yr)", "Fundamental Strength", 
+                    "Symbol",
+                    "Price ($)",
+                    "Elliott Degree",
+                    "Action Comment",
+                    "BUY TFs #",
+                    "SELL TFs #",
+                    "BUY Timeframes Hit",
+                    "SELL Timeframes Hit",
+                    "BUY Timeframes Hit Dates",
+                    "SELL Timeframes Hit Dates",
+                    "Latest BUY Date (any TF)",
+                    "BUY Date Timeframe",
+                    "Latest SELL Date (any TF)",
+                    "SELL Date Timeframe",
+                    "Last Annual BUY Date",
+                    "Annual BUY Timeframe",
+                    "Annual BUY Count (10yr)",
+                    "Fundamental Strength",
                     "Professor Note"
                 ]
                 available_cols = [c for c in target_columns if c in df.columns]
