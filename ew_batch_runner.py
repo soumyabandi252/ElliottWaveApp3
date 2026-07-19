@@ -33,7 +33,7 @@ INDEX_ORDER = [
 
 WIKI_SOURCES = {
     "SP500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-    "NASDAQ100": "https://en.wikipedia.org/wiki/Nasdaq-100",
+    "NASDAQ100": "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies",
     "DOW30": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
     "RUSSELL1000": "https://en.wikipedia.org/wiki/Russell_1000_Index",
     "RUSSELL2000": "https://en.wikipedia.org/wiki/Russell_2000_Index",
