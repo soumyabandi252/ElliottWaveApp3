@@ -96,18 +96,22 @@ STATE_KEYWORDS = ["state"]
 ACTION_KEYWORDS = ["action", "signal", "recommendation"]
 
 def style_dataframe(df):
-    """Applies Pandas Styler colors for Streamlit native dataframe"""
-    styles = pd.DataFrame('', index=df.index, columns=df.columns)
+    """Applies Pandas Styler element-wise to avoid Streamlit API Exceptions"""
+    styler = df.style
+    
+    # Handle pandas version differences gracefully (applymap deprecated in favor of map in newer pandas)
+    map_func = getattr(styler, "map", getattr(styler, "applymap", None))
     
     for col in df.columns:
         c_lower = str(col).lower()
         if any(k in c_lower for k in SCORE_KEYWORDS):
-            styles[col] = df[col].apply(lambda v: f"background-color: {score_bg(v)[0]}; color: {score_bg(v)[1]};" if score_bg(v) else "")
+            map_func(lambda v: f"background-color: {score_bg(v)[0]}; color: {score_bg(v)[1]};" if score_bg(v) else None, subset=[col])
         elif any(k in c_lower for k in STATE_KEYWORDS):
-            styles[col] = df[col].apply(lambda v: f"background-color: {state_bg(v)[0]}; color: {state_bg(v)[1]};" if state_bg(v) else "")
+            map_func(lambda v: f"background-color: {state_bg(v)[0]}; color: {state_bg(v)[1]};" if state_bg(v) else None, subset=[col])
         elif any(k in c_lower for k in ACTION_KEYWORDS):
-            styles[col] = df[col].apply(lambda v: f"background-color: {action_bg(v)[0]}; color: {action_bg(v)[1]};" if action_bg(v) else "")
-    return styles
+            map_func(lambda v: f"background-color: {action_bg(v)[0]}; color: {action_bg(v)[1]};" if action_bg(v) else None, subset=[col])
+            
+    return styler
 
 def apply_excel_style_filters(df, key_prefix):
     filtered = df.copy()
@@ -170,7 +174,7 @@ else:
                 st.info(f"No rows available for {name}.")
                 continue
                 
-            # Keep Dashboard column filter
+            # Filter columns exactly for the Dashboard
             if str(name).strip().lower() == "dashboard":
                 target_columns = [
                     "Symbol", "Price ($)", "Elliott Degree", "Current Wave", 
@@ -193,9 +197,9 @@ else:
             st.caption(f"Showing {len(view)} of {len(df)} rows. Click column headers to sort.")
             
             # Create Pandas Style object for coloring
-            styled_df = view.style.apply(style_dataframe, axis=None)
+            styled_df = style_dataframe(view)
 
-            # Native, paginated Streamlit DataFrame
+            # Native, paginated Streamlit DataFrame with freeze pane and styling
             st.dataframe(
                 styled_df,
                 use_container_width=True,
