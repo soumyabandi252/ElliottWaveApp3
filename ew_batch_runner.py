@@ -38,7 +38,7 @@ WIKI_SOURCES = {
     "RUSSELL1000": "https://en.wikipedia.org/wiki/Russell_1000_Index",
     "RUSSELL2000": "https://en.wikipedia.org/wiki/Russell_2000_Index",
      "SP600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
-    "SP400": "https://en.wikipedia.org/wiki/S%26P_400",
+    "SP400": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
 }
 
 ETF_PROXY = {
@@ -145,7 +145,8 @@ def get_sp600_tickers():
 
 
 def get_sp400_tickers():
-    return _read_html_table_symbols(WIKI_SOURCES["SP400"], ("Symbol"))
+    # Add the comma after "Symbol"
+    return _read_html_table_symbols(WIKI_SOURCES["SP400"], ("Symbol",))
 
 
 def _download_text(url):
