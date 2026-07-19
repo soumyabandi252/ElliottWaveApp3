@@ -128,7 +128,7 @@ def get_dow30_tickers():
 
 
 def get_russell1000_tickers():
-    return _read_html_table_symbols(WIKI_SOURCES["RUSSELL1000"], ("Ticker",))
+    return _read_html_table_symbols(WIKI_SOURCES["RUSSELL1000"], ("Symbol",))
 
 
 def get_russell2000_tickers():
