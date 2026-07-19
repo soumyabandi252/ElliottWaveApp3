@@ -66,11 +66,15 @@ def dedupe_columns(cols):
 
 @st.cache_data(ttl=300)
 def load_workbook():
-    if not os.path.exists(OUTPUT_XLSX):
+    import glob
+    # Find the latest generated file matching the pattern to support dynamic versioning
+    files = glob.glob("Elliott_Wave_NASDAQ_Composite_Master_Workbook*.xlsx")
+    if not files:
         return {}, None
-
-    mtime = datetime.fromtimestamp(os.path.getmtime(OUTPUT_XLSX))
-    sheets = pd.read_excel(OUTPUT_XLSX, sheet_name=None, engine="openpyxl")
+        
+    latest_file = max(files, key=os.path.getmtime)
+    mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
+    sheets = pd.read_excel(latest_file, sheet_name=None, engine="openpyxl")
 
     cleaned = {}
     for name, df in sheets.items():
@@ -227,14 +231,10 @@ def apply_excel_style_filters(df, key_prefix):
 
 def get_default_sorted_view(df):
     """Sorts dataframe to put Annual Buy and Annual SELL at the top if an 'Action' column exists"""
-    # Look for a column that represents the action/signal
     action_col = next((col for col in df.columns if classify_column(col) == "action"), None)
     
     if action_col:
-        # Create a temporary boolean column to check for target signals
         is_target_signal = df[action_col].astype(str).str.contains("Annual Buy|Annual SELL", case=False, na=False)
-        
-        # Sort so True values (mapped to False via ~ for ascending sort) come first
         sorted_df = df.assign(_is_top=~is_target_signal).sort_values('_is_top').drop(columns='_is_top')
         return sorted_df
         
@@ -271,19 +271,38 @@ with main_tab:
                     st.info(f"No rows available for {name}.")
                     continue
                 
-                # Apply the default sorting rule to prioritize Annual Buy/Sell
+                # ------ NEW COLUMN FILTERING LOGIC FOR DASHBOARD ------
+                if str(name).strip().lower() == "dashboard":
+                    target_columns = [
+                        "Symbol", "Price ($)", "Elliott Degree", "Current Wave", 
+                        "Wave Personality", "Next Wave Expected", "Alternate Count", 
+                        "Signal (BUY/SELL/WAIT)", "Action Comment", "BUY TFs #", 
+                        "SELL TFs #", "BUY Timeframes Hit", "SELL Timeframes Hit", 
+                        "BUY Timeframes Hit Dates", "SELL Timeframes Hit Dates", 
+                        "Latest BUY Date (any TF)", "BUY Date Timeframe", 
+                        "Latest SELL Date (any TF)", "SELL Date Timeframe", 
+                        "Last Annual BUY Date", "Annual BUY Timeframe", 
+                        "Annual BUY Count (10yr)", "Fundamental Strength", 
+                        "Professor Note"
+                    ]
+                    # Only keep columns that actually exist in the dataframe to prevent errors
+                    available_cols = [c for c in target_columns if c in df.columns]
+                    df = df[available_cols]
+                # ------------------------------------------------------
+                
                 df = get_default_sorted_view(df)
 
                 quick_search = st.text_input(
                     f"Quick search across all columns ({name})",
                     key=f"quick_{name}"
                 )
+                
                 view = df
                 if quick_search:
-                    mask = df.apply(
+                    mask = view.apply(
                         lambda col: col.astype(str).str.contains(quick_search, case=False, na=False)
                     )
-                    view = df[mask.any(axis=1)]
+                    view = view[mask.any(axis=1)]
 
                 view = apply_excel_style_filters(view, key_prefix=name)
 
@@ -294,7 +313,6 @@ with main_tab:
                 with c2:
                     sort_dir = st.radio("Order", ["Desc", "Asc"], horizontal=True, key=f"sortdir_{name}")
                 
-                # Only apply user sorting if they manually select a column
                 if sort_col != "(none)":
                     try:
                         numeric_try = pd.to_numeric(view[sort_col], errors="coerce")
