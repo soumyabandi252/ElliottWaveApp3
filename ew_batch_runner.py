@@ -92,21 +92,27 @@ def _fetch_html(url):
     return r.text
 
 
-def _read_html_table_symbols(url, preferred_cols=("Symbol", "Ticker", "Ticker symbol")):
-    html = _fetch_html(url)
-    tables = pd.read_html(html)
-    for tbl in tables:
-        cols = [str(c).strip() for c in tbl.columns]
-        for pref in preferred_cols:
-            if pref in cols:
-                return _clean_symbols(tbl[pref].tolist())
-    for tbl in tables:
-        if len(tbl.columns) > 0:
-            first = tbl.columns[0]
-            vals = _clean_symbols(tbl[first].tolist())
-            if vals:
-                return vals
-    raise RuntimeError(f"No symbol column found in {url}")
+def _read_html_table_symbols(url, match_columns):
+    # Use requests with a standard User-Agent to prevent Wikipedia from blocking the scraper
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()  # Ensure the request was successful
+    
+    # Wrap the raw HTML string in StringIO for modern pandas compatibility
+    html_io = io.StringIO(response.text)
+    
+    # Let pandas parse the tables from the StringIO object
+    tables = pd.read_html(html_io)
+    
+    # The rest of your existing logic to find the correct table:
+    for df in tables:
+        if all(col in df.columns for col in match_columns):
+            # Assuming you extract the first matching column as the symbols
+            return df[match_columns[0]].tolist()
+            
+    raise ValueError(f"Could not find a table with columns {match_columns} at {url}")
 
 
 def get_sp500_tickers():
