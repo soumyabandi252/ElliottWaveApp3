@@ -2,7 +2,7 @@ name: Elliott Wave Scan
 
 on:
   schedule:
-    - cron: '0 0 * * 7'
+    - cron: '0 14 * * 0'
   workflow_dispatch: {}
 
 permissions:
