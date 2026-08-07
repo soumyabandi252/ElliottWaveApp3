@@ -2,7 +2,7 @@ name: Elliott Wave Scan
 
 on:
   schedule:
-    - cron: '0 14 * * 0'
+    - cron: '0 0 * * *'   # Runs daily at 7:00 PM EST (UTC-5) = 00:00 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -21,6 +21,16 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Remove existing workbook if present
+        run: |
+          FILE="Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx"
+          if [ -f "$FILE" ]; then
+            echo "Existing file found, deleting: $FILE"
+            rm -f "$FILE"
+          else
+            echo "No existing file found, proceeding fresh."
+          fi
 
       - name: Run Elliott Wave scan
         run: python elliott_wave_NASDAQ_FINAL_optimized.py
