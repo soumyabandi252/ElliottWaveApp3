@@ -1,31 +1,57 @@
 """
 Performance-optimized batch/index runner for the Elliott Wave engine.
-Core Elliott logic is untouched. This layer only optimizes data acquisition,
-index constituent resolution, parallel execution, and output orchestration.
+PATCHED VERSION — fixes for GitHub Actions (ubuntu-latest) reliability:
+  1. Cross-platform output path (was hardcoded to C:\\... Windows path).
+  2. Shared curl_cffi browser-impersonating session for ALL network calls
+     (yfinance + requests to Wikipedia/NASDAQ Trader) to dodge TLS-fingerprint
+     blocking, which is the main cause of YFRateLimitError on cloud IPs.
+  3. Retry-with-backoff wrapper around every external HTTP/yfinance call.
+  4. Reduced + throttled concurrency for fast_info prefetch (24 -> 6 workers,
+     with small delays), since aggressive concurrency is what triggers the
+     rate limiter in the first place.
+  5. Each index-source fetch (Wikipedia tables, NASDAQ Trader listing, etc.)
+     now fails soft (logs + returns []) instead of raising and killing the
+     whole run — one flaky source no longer takes down the entire scan.
+
+Core Elliott logic (elliott_wave_engine_... module) is untouched.
 """
 import requests
 import io
 import os
 import re
 import time
+import random
 import math
 import json
+import logging
 import concurrent.futures as cf
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
-import requests
+from curl_cffi import requests as curl_requests
 
 import elliott_wave_engine_FINAL_ALL_PHASES_OPTIMIZED_v2_WITH_DATES as ew
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("batch_runner")
 
 _ORIGINAL_YF_DOWNLOAD = yf.download
 _DATA_CACHE = {}
 _INFO_CACHE = {}
 _BULK_INFO = {}
 
-DEFAULT_OUTPUT_ROOT = r"C:\\IdentifyStockLowsHighs\\ELL_Output"
+_SESSION = curl_requests.Session(impersonate="chrome")
+
+# --- Cross-platform output root ---------------------------------------
+# Falls back to a repo-relative folder on Linux/CI; keeps your Windows
+# path when actually running on Windows locally.
+if os.name == "nt":
+    DEFAULT_OUTPUT_ROOT = r"C:\IdentifyStockLowsHighs\ELL_Output"
+else:
+    DEFAULT_OUTPUT_ROOT = str(Path.cwd() / "ELL_Output")
+
 INDEX_ORDER = [
     "SP500", "NASDAQ100", "NASDAQ_COMPOSITE", "DOW30", "RUSSELL1000",
     "RUSSELL2000", "SP600", "SP400", "NASDAQ1000", "NASDAQ2000", "IWM"
@@ -37,46 +63,16 @@ WIKI_SOURCES = {
     "DOW30": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
     "RUSSELL1000": "https://en.wikipedia.org/wiki/Russell_1000_Index",
     "RUSSELL2000": "https://en.wikipedia.org/wiki/Russell_2000_Index",
-     "SP600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
+    "SP600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
     "SP400": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
 }
 
-ETF_PROXY = {
-    "IWM": ["IWM"],
-}
+ETF_PROXY = {"IWM": ["IWM"]}
 
 NASDAQ_LISTING_URLS = [
     "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
     "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
 ]
-
-
-def _sanitize_symbol(sym):
-    if sym is None:
-        return None
-    s = str(sym).strip().upper()
-    if not s or s in {"NAN", "NONE"}:
-        return None
-    s = s.replace(".", "-")
-    s = s.replace("/", "-")
-    s = re.sub(r"\s+", "", s)
-    return s
-
-
-def _clean_symbols(symbols):
-    seen = set()
-    out = []
-    for s in symbols:
-        ss = _sanitize_symbol(s)
-        if not ss:
-            continue
-        if any(ch in ss for ch in ['$', '^']):
-            continue
-        if ss not in seen:
-            seen.add(ss)
-            out.append(ss)
-    return out
-
 
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -86,33 +82,67 @@ REQUEST_HEADERS = {
 }
 
 
+# --- Generic retry helper ----------------------------------------------
+def _with_retry(fn, *args, max_retries=4, base_delay=8.0, label="", **kwargs):
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries:
+                logger.error(f"[{label}] failed after {max_retries} attempts: {e}")
+                raise
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 4)
+            logger.warning(f"[{label}] attempt {attempt}/{max_retries} failed ({e}); "
+                            f"retrying in {delay:.1f}s")
+            time.sleep(delay)
+
+
+def _sanitize_symbol(sym):
+    if sym is None:
+        return None
+    s = str(sym).strip().upper()
+    if not s or s in {"NAN", "NONE"}:
+        return None
+    s = s.replace(".", "-").replace("/", "-")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def _clean_symbols(symbols):
+    seen, out = set(), []
+    for s in symbols:
+        ss = _sanitize_symbol(s)
+        if not ss or any(ch in ss for ch in ['$', '^']):
+            continue
+        if ss not in seen:
+            seen.add(ss)
+            out.append(ss)
+    return out
+
+
 def _fetch_html(url):
-    r = requests.get(url, headers=REQUEST_HEADERS, timeout=60)
-    r.raise_for_status()
-    return r.text
+    def _do():
+        r = _SESSION.get(url, headers=REQUEST_HEADERS, timeout=60)
+        r.raise_for_status()
+        return r.text
+    return _with_retry(_do, label=f"fetch_html:{url}")
 
 
 def _read_html_table_symbols(url, match_columns):
-    # Use requests with a standard User-Agent to prevent Wikipedia from blocking the scraper
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-    }
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()  # Ensure the request was successful
-    
-    # Wrap the raw HTML string in StringIO for modern pandas compatibility
-    html_io = io.StringIO(response.text)
-    
-    # Let pandas parse the tables from the StringIO object
-    tables = pd.read_html(html_io)
-    
-    # The rest of your existing logic to find the correct table:
-    for df in tables:
-        if all(col in df.columns for col in match_columns):
-            # Assuming you extract the first matching column as the symbols
-            return df[match_columns[0]].tolist()
-            
-    raise ValueError(f"Could not find a table with columns {match_columns} at {url}")
+    def _do():
+        response = _SESSION.get(url, headers=REQUEST_HEADERS, timeout=60)
+        response.raise_for_status()
+        html_io = io.StringIO(response.text)
+        tables = pd.read_html(html_io)
+        for df in tables:
+            if all(col in df.columns for col in match_columns):
+                return df[match_columns[0]].tolist()
+        raise ValueError(f"Could not find a table with columns {match_columns} at {url}")
+    try:
+        return _with_retry(_do, label=f"wiki_table:{url}")
+    except Exception as e:
+        logger.warning(f"Skipping source {url} after repeated failures: {e}")
+        return []
 
 
 def get_sp500_tickers():
@@ -130,47 +160,57 @@ def get_dow30_tickers():
 def get_russell1000_tickers():
     return _read_html_table_symbols(WIKI_SOURCES["RUSSELL1000"], ("Symbol",))
 
+
 def get_russell2000_tickers():
-    import pandas as pd
     try:
         df = pd.read_csv("russell2000_tickers.csv")
         return df['Ticker'].dropna().tolist()
     except FileNotFoundError:
-        print("Warning: russell2000_tickers.csv not found. Returning empty list.")
+        logger.warning("russell2000_tickers.csv not found. Returning empty list.")
         return []
-        
+
+
 def get_sp600_tickers():
-    # Note the comma after "Symbol"
     return _read_html_table_symbols(WIKI_SOURCES["SP600"], ("Symbol",))
 
 
 def get_sp400_tickers():
-    # Add the comma after "Symbol"
     return _read_html_table_symbols(WIKI_SOURCES["SP400"], ("Symbol",))
 
 
 def _download_text(url):
-    r = requests.get(url, headers=REQUEST_HEADERS, timeout=60)
-    r.raise_for_status()
-    return r.text
+    def _do():
+        r = _SESSION.get(url, headers=REQUEST_HEADERS, timeout=60)
+        r.raise_for_status()
+        return r.text
+    return _with_retry(_do, label=f"download_text:{url}")
 
 
 def _load_nasdaq_trader_frames():
     frames = []
     for url in NASDAQ_LISTING_URLS:
-        txt = _download_text(url)
+        try:
+            txt = _download_text(url)
+        except Exception as e:
+            logger.warning(f"NASDAQ Trader listing failed for {url}: {e}")
+            frames.append(pd.DataFrame())
+            continue
         lines = [ln for ln in txt.splitlines() if ln.strip()]
+        if not lines:
+            frames.append(pd.DataFrame())
+            continue
         header = lines[0].split('|')
         rows = [ln.split('|') for ln in lines[1:] if not ln.startswith('File Creation Time')]
-        df = pd.DataFrame(rows, columns=header)
-        frames.append(df)
+        frames.append(pd.DataFrame(rows, columns=header))
     return frames
 
 
 def _all_nasdaq_exchange_symbols():
     frames = _load_nasdaq_trader_frames()
-    nasdaqlisted = frames[0].copy()
-    otherlisted = frames[1].copy()
+    if len(frames) < 2 or frames[0].empty:
+        logger.warning("NASDAQ exchange symbol lists unavailable; returning empty list.")
+        return []
+    nasdaqlisted, otherlisted = frames[0].copy(), frames[1].copy()
 
     nl = nasdaqlisted.copy()
     if 'Test Issue' in nl.columns:
@@ -195,34 +235,39 @@ def get_nasdaq_composite_tickers():
     return _all_nasdaq_exchange_symbols()
 
 
-def _caps_from_fast_download(symbols, chunk_size=400, pause_sec=1.5):
+def _yf_download_safe(tickers, **kwargs):
+    def _do():
+        return _ORIGINAL_YF_DOWNLOAD(tickers, session=_SESSION, **kwargs)
+    label = tickers if isinstance(tickers, str) else f"{len(tickers)} tickers"
+    return _with_retry(_do, label=f"yf.download:{label}")
+
+
+def _caps_from_fast_download(symbols, chunk_size=200, pause_sec=3.0):
     caps = {}
     for i in range(0, len(symbols), chunk_size):
-        chunk = symbols[i:i+chunk_size]
-        data = _ORIGINAL_YF_DOWNLOAD(chunk, period='5d', interval='1d', group_by='ticker', threads=True, progress=False, auto_adjust=True)
-        if len(chunk) == 1:
-            t = chunk[0]
+        chunk = symbols[i:i + chunk_size]
+        try:
+            data = _yf_download_safe(chunk, period='5d', interval='1d',
+                                      group_by='ticker', threads=True,
+                                      progress=False, auto_adjust=True)
+        except Exception as e:
+            logger.warning(f"Market-cap chunk {i}-{i+len(chunk)} failed, skipping: {e}")
+            time.sleep(pause_sec)
+            continue
+
+        for t in chunk:
             try:
-                px = float(data['Close'].dropna().iloc[-1])
-                sh = yf.Ticker(t).fast_info.get('shares') or yf.Ticker(t).fast_info.get('sharesOutstanding')
-                if px and sh:
-                    caps[t] = float(px) * float(sh)
+                sub = data[t] if len(chunk) > 1 else data
+                px = float(sub['Close'].dropna().iloc[-1])
             except Exception:
-                pass
-        else:
-            for t in chunk:
-                try:
-                    sub = data[t]
-                    px = float(sub['Close'].dropna().iloc[-1])
-                except Exception:
-                    px = None
-                try:
-                    fi = yf.Ticker(t).fast_info
-                    sh = fi.get('shares') or fi.get('sharesOutstanding')
-                except Exception:
-                    sh = None
-                if px and sh:
-                    caps[t] = float(px) * float(sh)
+                px = None
+            try:
+                fi = yf.Ticker(t, session=_SESSION).fast_info
+                sh = fi.get('shares') or fi.get('sharesOutstanding')
+            except Exception:
+                sh = None
+            if px and sh:
+                caps[t] = float(px) * float(sh)
         time.sleep(pause_sec)
     return caps
 
@@ -234,13 +279,11 @@ def _top_n_by_market_cap(symbols, n):
 
 
 def get_nasdaq1000_tickers():
-    syms = get_nasdaq_composite_tickers()
-    return _top_n_by_market_cap(syms, 1000)
+    return _top_n_by_market_cap(get_nasdaq_composite_tickers(), 1000)
 
 
 def get_nasdaq2000_tickers():
-    syms = get_nasdaq_composite_tickers()
-    return _top_n_by_market_cap(syms, 2000)
+    return _top_n_by_market_cap(get_nasdaq_composite_tickers(), 2000)
 
 
 def get_iwm_tickers():
@@ -264,24 +307,31 @@ def resolve_index_map(target_indexes=None):
     requested = target_indexes or INDEX_ORDER
     idx = {}
     for name in requested:
-        idx[name] = builders[name]()
+        try:
+            idx[name] = builders[name]()
+        except Exception as e:
+            logger.error(f"Index source {name} failed entirely, skipping: {e}")
+            idx[name] = []
     return {k: _clean_symbols(v) for k, v in idx.items()}
 
 
 def _patched_download(ticker, period="10y", interval="1d", progress=False, auto_adjust=True, **kwargs):
     if ticker in _DATA_CACHE:
         return _DATA_CACHE[ticker].copy()
-    return _ORIGINAL_YF_DOWNLOAD(ticker, period=period, interval=interval, progress=progress, auto_adjust=auto_adjust, **kwargs)
+    return _yf_download_safe(ticker, period=period, interval=interval,
+                              progress=progress, auto_adjust=auto_adjust, **kwargs)
 
 
-def _prefetch_prices(tickers, period='10y', interval='1d', chunk_size=120, pause_sec=1.5):
+def _prefetch_prices(tickers, period='10y', interval='1d', chunk_size=80, pause_sec=3.0):
     tickers = _clean_symbols(tickers)
     total = len(tickers)
     for i in range(0, total, chunk_size):
-        chunk = tickers[i:i+chunk_size]
-        print(f"[PRICE PREFETCH] {i+1}-{i+len(chunk)} / {total}")
+        chunk = tickers[i:i + chunk_size]
+        logger.info(f"[PRICE PREFETCH] {i+1}-{i+len(chunk)} / {total}")
         try:
-            data = _ORIGINAL_YF_DOWNLOAD(chunk, period=period, interval=interval, group_by='ticker', threads=True, progress=False, auto_adjust=True)
+            data = _yf_download_safe(chunk, period=period, interval=interval,
+                                      group_by='ticker', threads=True,
+                                      progress=False, auto_adjust=True)
             if len(chunk) == 1:
                 _DATA_CACHE[chunk[0]] = data.dropna(how='all')
             else:
@@ -293,21 +343,29 @@ def _prefetch_prices(tickers, period='10y', interval='1d', chunk_size=120, pause
                     except Exception:
                         continue
         except Exception as exc:
-            print(f"  chunk failed: {exc}")
+            logger.warning(f"  chunk failed, skipping {len(chunk)} tickers: {exc}")
         time.sleep(pause_sec)
 
 
-def _prefetch_fast_info(tickers, max_workers=24):
+def _prefetch_fast_info(tickers, max_workers=6, pause_between_batches=2.0, batch_size=100):
+    """Throttled version: was max_workers=24 hitting Yahoo with zero pacing.
+    Now runs small batches of workers with a pause in between."""
     tickers = _clean_symbols(tickers)
+
     def grab(t):
         try:
-            fi = dict(yf.Ticker(t).fast_info)
+            fi = dict(yf.Ticker(t, session=_SESSION).fast_info)
             _INFO_CACHE[t] = fi
             return True
         except Exception:
             return False
-    with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        list(ex.map(grab, tickers))
+
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
+        logger.info(f"[FAST_INFO] {i+1}-{i+len(batch)} / {len(tickers)}")
+        with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            list(ex.map(grab, batch))
+        time.sleep(pause_between_batches)
 
 
 def _patched_fundamental_strength(ticker):
@@ -316,7 +374,7 @@ def _patched_fundamental_strength(ticker):
     info = _INFO_CACHE.get(ticker)
     if not info:
         try:
-            info = dict(yf.Ticker(ticker).fast_info)
+            info = dict(yf.Ticker(ticker, session=_SESSION).fast_info)
             _INFO_CACHE[ticker] = info
         except Exception as exc:
             return "UNKNOWN (data error)", str(exc)
@@ -355,7 +413,7 @@ def run_one_index(index_name, tickers, output_root=DEFAULT_OUTPUT_ROOT, max_work
     out_dir = os.path.join(output_root, index_name)
     os.makedirs(out_dir, exist_ok=True)
     rows = []
-    print(f"\n=== {index_name}: {len(tickers)} tickers ===")
+    logger.info(f"=== {index_name}: {len(tickers)} tickers ===")
     with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {executor.submit(ew.analyze_ticker, t): t for t in tickers}
         done = 0
@@ -369,9 +427,9 @@ def run_one_index(index_name, tickers, output_root=DEFAULT_OUTPUT_ROOT, max_work
                     row['Source_Index'] = index_name
                     rows.append(row)
                 if done % 25 == 0 or done == len(tickers):
-                    print(f"  {index_name}: {done}/{len(tickers)} complete")
+                    logger.info(f"  {index_name}: {done}/{len(tickers)} complete")
             except Exception as exc:
-                print(f"  {index_name}: {t} failed: {exc}")
+                logger.warning(f"  {index_name}: {t} failed: {exc}")
     if not rows:
         return pd.DataFrame(), None, None
     df = pd.DataFrame(rows)
@@ -386,12 +444,15 @@ def run_one_index(index_name, tickers, output_root=DEFAULT_OUTPUT_ROOT, max_work
 def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     ew.yf.download = _patched_download
     ew.fundamental_strength = _patched_fundamental_strength
+
     index_map = resolve_index_map()
     all_unique = _clean_symbols(sorted({s for vals in index_map.values() for s in vals}))
-    print(f'Total unique tickers across requested indexes: {len(all_unique)}')
-    print('Prefetching price history...')
+    logger.info(f'Total unique tickers across requested indexes: {len(all_unique)}')
+
+    logger.info('Prefetching price history...')
     _prefetch_prices(all_unique)
-    print('Prefetching fast fundamental info...')
+
+    logger.info('Prefetching fast fundamental info (throttled)...')
     _prefetch_fast_info(all_unique)
 
     results = {}
@@ -400,10 +461,12 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     for name in INDEX_ORDER:
         tickers = index_map.get(name, [])
         if not tickers:
+            logger.warning(f"No tickers resolved for {name}; skipping.")
             continue
         df, csv_path, xlsx_path = run_one_index(name, tickers, output_root=output_root, max_workers=max_workers)
         results[name] = {'rows': len(df), 'csv': csv_path, 'xlsx': xlsx_path, 'tickers': len(tickers)}
-        manifest_rows.append({'Index': name, 'Input_Tickers': len(tickers), 'Output_Rows': len(df), 'CSV_Path': csv_path, 'XLSX_Path': xlsx_path})
+        manifest_rows.append({'Index': name, 'Input_Tickers': len(tickers), 'Output_Rows': len(df),
+                               'CSV_Path': csv_path, 'XLSX_Path': xlsx_path})
         if not df.empty:
             combined.append(df)
 
@@ -412,15 +475,12 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     os.makedirs(combined_dir, exist_ok=True)
     manifest_path = os.path.join(combined_dir, f'INDEX_RUN_MANIFEST_{ts}.csv')
     pd.DataFrame(manifest_rows).to_csv(manifest_path, index=False)
+
     if combined:
         combined_df = pd.concat(combined, ignore_index=True)
-        
-        # New Versioning Logic for the Master Workbook
         import glob
-        
         base_filename = "Elliott_Wave_NASDAQ_Composite_Master_Workbook"
         extension = ".xlsx"
-        # Saving directly to root so GitHub Actions can find it easily
         existing_files = glob.glob(f"{base_filename}*{extension}")
 
         if not existing_files:
@@ -436,17 +496,16 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
                     max_version = max(max_version, 0)
             new_filename = f"{base_filename}_v{max_version + 1}{extension}"
 
-        # Save CSV for historical backup and the versioned Master Excel file
         combined_csv = os.path.join(combined_dir, f'ALL_INDEXES_COMBINED_{ts}.csv')
         combined_df.to_csv(combined_csv, index=False)
-        
         combined_xlsx = new_filename
         ew.write_excel(combined_df, combined_xlsx)
-        print(f"Successfully saved versioned master file: {combined_xlsx}")
+        logger.info(f"Successfully saved versioned master file: {combined_xlsx}")
     else:
         combined_df = pd.DataFrame()
         combined_csv = None
         combined_xlsx = None
+        logger.error("No data collected from ANY index — check network/rate-limit warnings above.")
 
     summary = {
         'output_root': output_root,
