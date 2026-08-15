@@ -2,7 +2,7 @@ name: Elliott Wave Scan
 
 on:
   schedule:
-    - cron: '0 0 * * 2,4,6'   # Runs Mon/Wed/Fri at 7:00 PM EST (UTC-5) = Tue/Thu/Sat 00:00 UTC
+    - cron: '10 6 * * 2,4,6'   # Runs Mon/Wed/Fri at 7:00 PM EST (UTC-5) = Tue/Thu/Sat 00:00 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -39,7 +39,23 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx
+
+          FILE="Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx"
+
+          git add "$FILE"
           git diff --cached --quiet && echo "No changes to commit" || git commit -m "Auto-update Elliott Wave scan results [skip ci]"
-          git pull --rebase
-          git push
+
+          git fetch origin main
+
+          if git rebase origin/main -X theirs; then
+            echo "Rebase succeeded cleanly."
+          else
+            echo "Rebase hit a conflict — resolving by keeping the freshly generated workbook."
+            git rebase --abort || true
+            git fetch origin main
+            git reset --soft origin/main
+            git add "$FILE"
+            git diff --cached --quiet && echo "No changes to commit after reset" || git commit -m "Auto-update Elliott Wave scan results [skip ci]"
+          fi
+
+          git push origin main
