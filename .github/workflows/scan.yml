@@ -2,7 +2,7 @@ name: Elliott Wave Scan
 
 on:
   schedule:
-    - cron: '0 0 * * 2,4,6'   # Runs Mon/Wed/Fri at 7:00 PM EST (UTC-5) = Tue/Thu/Sat 00:00 UTC
+    - cron: '0 11 * * 2,4,6'   # Runs Tue/Thu/Sat at 6:00 AM EST (UTC-5) = 11:00 AM UTC
   workflow_dispatch: {}
 
 permissions:
@@ -37,10 +37,15 @@ jobs:
 
       - name: Commit updated workbook
         run: |
+          FILE="Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx"
+
+          if [ ! -f "$FILE" ]; then
+            echo "Workbook missing after scan — skipping commit to avoid deleting repo history."
+            exit 1
+          fi
+
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-
-          FILE="Elliott_Wave_NASDAQ_Composite_Master_Workbook.xlsx"
 
           git add "$FILE"
           git diff --cached --quiet && echo "No changes to commit" || git commit -m "Auto-update Elliott Wave scan results [skip ci]"
