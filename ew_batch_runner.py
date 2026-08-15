@@ -1,26 +1,33 @@
 """
 Performance-optimized batch/index runner for the Elliott Wave engine.
-v3 — full US universe coverage + true deduplication.
+v4 — adds NASDAQ Trader fetch caching on top of everything in v3.
 
-All prior fixes retained (curl_cffi session, retry/backoff, throttled
-concurrency, cross-platform path, soft-fail sources, Russell 2000 via
-iShares, raises on empty output to protect git history).
+All prior fixes retained:
+  - Cross-platform output path.
+  - Shared curl_cffi session for all network calls.
+  - Retry-with-backoff on every external call.
+  - Throttled concurrency for fast_info prefetch.
+  - Soft-fail per index source (one bad source doesn't kill the run).
+  - Russell 2000 via live iShares IWM holdings CSV (no local file needed).
+  - ALL_US_LISTED: full US exchange coverage (NYSE/NYSE American/NYSE
+    Arca/Cboe BZX/Nasdaq), not just Nasdaq-only.
+  - Single-pass global analysis: every unique ticker analyzed EXACTLY
+    ONCE regardless of how many indexes it belongs to -- eliminates
+    duplicate rows in the combined output by construction, and avoids
+    wasted recomputation.
+  - run_all_indexes() raises if no workbook is produced (protects git
+    history from the earlier self-deletion bug).
 
-NEW in v3:
-  1. ALL_US_LISTED source: previously, NASDAQ_COMPOSITE filtered
-     otherlisted.txt down to Exchange=='Q' (Nasdaq only), silently
-     excluding NYSE, NYSE American, NYSE Arca, and Cboe BZX listings.
-     ALL_US_LISTED keeps every exchange, giving genuine full-market
-     US common stock coverage (~8,000+ tickers).
-  2. TRUE deduplication by design, not by post-hoc dropping: every
-     unique ticker across ALL indexes is now analyzed EXACTLY ONCE in
-     a single global pass. Previously, a ticker in 4 overlapping
-     indexes was redundantly re-analyzed 4 times and appended 4 times
-     to the combined output. Now each ticker's result is computed once
-     and tagged with every index it belongs to (Source_Index column
-     becomes a comma-joined list, e.g. "DOW30,NASDAQ100,SP500"), so
-     the combined workbook has zero duplicate rows AND the run is
-     significantly faster since nothing is recomputed.
+NEW in v4:
+  - _load_nasdaq_trader_frames() is now cached at module level
+    (_NASDAQ_TRADER_CACHE). Previously this fetched the same two NASDAQ
+    Trader files (nasdaqlisted.txt, otherlisted.txt) fresh on EVERY call
+    -- and it was called 4 separate times per run (NASDAQ_COMPOSITE,
+    NASDAQ1000, NASDAQ2000, ALL_US_LISTED), hitting the same external
+    endpoint repeatedly in quick succession. That repeat-hit pattern is
+    a common trigger for short-window IP rate limiting. Now the actual
+    network fetch happens once per run; every caller reuses the cached
+    result.
 """
 import requests
 import io
@@ -48,6 +55,7 @@ _ORIGINAL_YF_DOWNLOAD = yf.download
 _DATA_CACHE = {}
 _INFO_CACHE = {}
 _BULK_INFO = {}
+_NASDAQ_TRADER_CACHE = None
 
 _SESSION = curl_requests.Session(impersonate="chrome")
 
@@ -228,6 +236,13 @@ def _download_text(url):
 
 
 def _load_nasdaq_trader_frames():
+    """Cached at module level -- the network fetch happens ONCE per run,
+    no matter how many callers (NASDAQ_COMPOSITE, NASDAQ1000, NASDAQ2000,
+    ALL_US_LISTED) need this data."""
+    global _NASDAQ_TRADER_CACHE
+    if _NASDAQ_TRADER_CACHE is not None:
+        return _NASDAQ_TRADER_CACHE
+
     frames = []
     for url in NASDAQ_LISTING_URLS:
         try:
@@ -243,6 +258,8 @@ def _load_nasdaq_trader_frames():
         header = lines[0].split('|')
         rows = [ln.split('|') for ln in lines[1:] if not ln.startswith('File Creation Time')]
         frames.append(pd.DataFrame(rows, columns=header))
+
+    _NASDAQ_TRADER_CACHE = frames
     return frames
 
 
@@ -281,8 +298,7 @@ def get_nasdaq_composite_tickers():
 def _all_us_listed_symbols():
     """Full US-listed common stock universe: nasdaqlisted.txt (all Nasdaq
     tiers) + otherlisted.txt with NO exchange filter, i.e. NYSE, NYSE
-    American, NYSE Arca, Cboe BZX, and Nasdaq all included. This is the
-    genuinely comprehensive 'all US stocks' source."""
+    American, NYSE Arca, Cboe BZX, and Nasdaq all included."""
     frames = _load_nasdaq_trader_frames()
     if len(frames) < 2 or frames[0].empty:
         logger.warning("NASDAQ Trader listing files unavailable; ALL_US_LISTED empty.")
@@ -301,7 +317,6 @@ def _all_us_listed_symbols():
         ol = ol[ol['Test Issue'].astype(str).str.upper() != 'Y']
     if 'ETF' in ol.columns:
         ol = ol[ol['ETF'].astype(str).str.upper() != 'Y']
-    # No Exchange filter here -- keeps NYSE/NYSE American/NYSE Arca/Cboe BZX too.
     symcol = 'NASDAQ Symbol' if 'NASDAQ Symbol' in ol.columns else ('Symbol' if 'Symbol' in ol.columns else None)
     ol_syms = ol[symcol].tolist() if symcol else []
 
@@ -500,13 +515,11 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     logger.info('Prefetching fast fundamental info (throttled)...')
     _prefetch_fast_info(all_unique)
 
-    # Reverse map: ticker -> set of index names it belongs to
     ticker_to_indexes = {}
     for name, tickers in index_map.items():
         for t in tickers:
             ticker_to_indexes.setdefault(t, set()).add(name)
 
-    # --- SINGLE global analysis pass: every unique ticker analyzed exactly once ---
     logger.info(f"Analyzing {len(all_unique)} unique tickers (single pass, zero duplication)...")
     unique_rows = {}
     with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -530,8 +543,6 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     results = {}
     manifest_rows = []
 
-    # Per-index outputs are built by SLICING the already-computed unique_rows,
-    # never re-analyzing -- this is what eliminates redundant compute.
     for name in INDEX_ORDER:
         tickers = index_map.get(name, [])
         if not tickers:
@@ -560,7 +571,6 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
     combined_csv = None
 
     if unique_rows:
-        # Already deduplicated by construction -- one dict entry per ticker.
         combined_df = pd.DataFrame(list(unique_rows.values()))
         import glob
         base_filename = "Elliott_Wave_NASDAQ_Composite_Master_Workbook"
