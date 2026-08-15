@@ -2,7 +2,7 @@ name: Elliott Wave Scan
 
 on:
   schedule:
-    - cron: '10 6 * * 2,4,6'   # Runs Mon/Wed/Fri at 7:00 PM EST (UTC-5) = Tue/Thu/Sat 00:00 UTC
+    - cron: '10 6 * * 2,4,6'   # Run Mon/Wed/Fri at 7:00 PM EST (UTC-5) = Tue/Thu/Sat 00:00 UTC
   workflow_dispatch: {}
 
 permissions:
