@@ -1,19 +1,21 @@
 """
 Performance-optimized batch/index runner for the Elliott Wave engine.
-PATCHED VERSION — fixes for GitHub Actions (ubuntu-latest) reliability:
-  1. Cross-platform output path (was hardcoded to C:\\... Windows path).
-  2. Shared curl_cffi browser-impersonating session for ALL network calls
-     (yfinance + requests to Wikipedia/NASDAQ Trader) to dodge TLS-fingerprint
-     blocking, which is the main cause of YFRateLimitError on cloud IPs.
-  3. Retry-with-backoff wrapper around every external HTTP/yfinance call.
-  4. Reduced + throttled concurrency for fast_info prefetch (24 -> 6 workers,
-     with small delays), since aggressive concurrency is what triggers the
-     rate limiter in the first place.
-  5. Each index-source fetch (Wikipedia tables, NASDAQ Trader listing, etc.)
-     now fails soft (logs + returns []) instead of raising and killing the
-     whole run — one flaky source no longer takes down the entire scan.
+v2 — adds a real Russell 2000 data source.
 
-Core Elliott logic (elliott_wave_engine_... module) is untouched.
+All prior fixes retained:
+  1. Cross-platform output path.
+  2. Shared curl_cffi session for all network calls (dodges rate limiting).
+  3. Retry-with-backoff on every external call.
+  4. Throttled concurrency for fast_info prefetch.
+  5. Soft-fail per index source (one bad source doesn't kill the run).
+  6. run_all_indexes() raises if no workbook is produced (prevents the
+     git-history self-deletion bug from earlier).
+
+NEW in v2:
+  7. get_russell2000_tickers() now fetches IWM's (Russell 2000 ETF) live
+     holdings CSV directly from iShares/BlackRock, instead of relying on
+     a local russell2000_tickers.csv file that was never created. This
+     was silently contributing ZERO tickers on every prior run.
 """
 import requests
 import io
@@ -44,9 +46,6 @@ _BULK_INFO = {}
 
 _SESSION = curl_requests.Session(impersonate="chrome")
 
-# --- Cross-platform output root ---------------------------------------
-# Falls back to a repo-relative folder on Linux/CI; keeps your Windows
-# path when actually running on Windows locally.
 if os.name == "nt":
     DEFAULT_OUTPUT_ROOT = r"C:\IdentifyStockLowsHighs\ELL_Output"
 else:
@@ -74,6 +73,11 @@ NASDAQ_LISTING_URLS = [
     "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
 ]
 
+IWM_HOLDINGS_URL = (
+    "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf"
+    "/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
+)
+
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
@@ -82,7 +86,6 @@ REQUEST_HEADERS = {
 }
 
 
-# --- Generic retry helper ----------------------------------------------
 def _with_retry(fn, *args, max_retries=4, base_delay=8.0, label="", **kwargs):
     for attempt in range(1, max_retries + 1):
         try:
@@ -162,12 +165,47 @@ def get_russell1000_tickers():
 
 
 def get_russell2000_tickers():
+    """Fetches live IWM (Russell 2000 ETF) holdings from iShares as the
+    Russell 2000 constituent list, instead of a local CSV that was
+    never created (previously silently returned []) on every run)."""
+    def _do():
+        r = _SESSION.get(IWM_HOLDINGS_URL, headers=REQUEST_HEADERS, timeout=60)
+        r.raise_for_status()
+        return r.text
+
     try:
-        df = pd.read_csv("russell2000_tickers.csv")
-        return df['Ticker'].dropna().tolist()
-    except FileNotFoundError:
-        logger.warning("russell2000_tickers.csv not found. Returning empty list.")
+        text = _with_retry(_do, label="ishares_iwm_holdings")
+    except Exception as e:
+        logger.warning(f"iShares IWM holdings fetch failed: {e}")
         return []
+
+    lines = text.splitlines()
+    header_idx = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("Ticker,"):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        logger.warning("Could not locate holdings table header in iShares CSV response.")
+        return []
+
+    try:
+        csv_body = "\n".join(lines[header_idx:])
+        df = pd.read_csv(io.StringIO(csv_body))
+    except Exception as e:
+        logger.warning(f"Failed to parse iShares IWM holdings CSV: {e}")
+        return []
+
+    if "Ticker" not in df.columns:
+        return []
+
+    tickers = df["Ticker"].dropna().astype(str).tolist()
+    tickers = [t for t in tickers if t.strip() and t.strip().upper() not in
+               {"CASH", "USD CASH", "--", "N/A"}]
+
+    logger.info(f"Fetched {len(tickers)} Russell 2000 constituents from iShares IWM holdings.")
+    return tickers
 
 
 def get_sp600_tickers():
@@ -348,8 +386,6 @@ def _prefetch_prices(tickers, period='10y', interval='1d', chunk_size=80, pause_
 
 
 def _prefetch_fast_info(tickers, max_workers=6, pause_between_batches=2.0, batch_size=100):
-    """Throttled version: was max_workers=24 hitting Yahoo with zero pacing.
-    Now runs small batches of workers with a pause in between."""
     tickers = _clean_symbols(tickers)
 
     def grab(t):
@@ -506,6 +542,11 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
         combined_csv = None
         combined_xlsx = None
         logger.error("No data collected from ANY index — check network/rate-limit warnings above.")
+
+    if combined_xlsx is None:
+        logger.error("No workbook was generated this run — every index came back empty. "
+                     "Aborting so CI does not commit a deletion of the last good workbook.")
+        raise RuntimeError("No data produced by any index; refusing to proceed without a valid workbook.")
 
     summary = {
         'output_root': output_root,
