@@ -1,21 +1,26 @@
 """
 Performance-optimized batch/index runner for the Elliott Wave engine.
-v2 — adds a real Russell 2000 data source.
+v3 — full US universe coverage + true deduplication.
 
-All prior fixes retained:
-  1. Cross-platform output path.
-  2. Shared curl_cffi session for all network calls (dodges rate limiting).
-  3. Retry-with-backoff on every external call.
-  4. Throttled concurrency for fast_info prefetch.
-  5. Soft-fail per index source (one bad source doesn't kill the run).
-  6. run_all_indexes() raises if no workbook is produced (prevents the
-     git-history self-deletion bug from earlier).
+All prior fixes retained (curl_cffi session, retry/backoff, throttled
+concurrency, cross-platform path, soft-fail sources, Russell 2000 via
+iShares, raises on empty output to protect git history).
 
-NEW in v2:
-  7. get_russell2000_tickers() now fetches IWM's (Russell 2000 ETF) live
-     holdings CSV directly from iShares/BlackRock, instead of relying on
-     a local russell2000_tickers.csv file that was never created. This
-     was silently contributing ZERO tickers on every prior run.
+NEW in v3:
+  1. ALL_US_LISTED source: previously, NASDAQ_COMPOSITE filtered
+     otherlisted.txt down to Exchange=='Q' (Nasdaq only), silently
+     excluding NYSE, NYSE American, NYSE Arca, and Cboe BZX listings.
+     ALL_US_LISTED keeps every exchange, giving genuine full-market
+     US common stock coverage (~8,000+ tickers).
+  2. TRUE deduplication by design, not by post-hoc dropping: every
+     unique ticker across ALL indexes is now analyzed EXACTLY ONCE in
+     a single global pass. Previously, a ticker in 4 overlapping
+     indexes was redundantly re-analyzed 4 times and appended 4 times
+     to the combined output. Now each ticker's result is computed once
+     and tagged with every index it belongs to (Source_Index column
+     becomes a comma-joined list, e.g. "DOW30,NASDAQ100,SP500"), so
+     the combined workbook has zero duplicate rows AND the run is
+     significantly faster since nothing is recomputed.
 """
 import requests
 import io
@@ -53,7 +58,8 @@ else:
 
 INDEX_ORDER = [
     "SP500", "NASDAQ100", "NASDAQ_COMPOSITE", "DOW30", "RUSSELL1000",
-    "RUSSELL2000", "SP600", "SP400", "NASDAQ1000", "NASDAQ2000", "IWM"
+    "RUSSELL2000", "SP600", "SP400", "NASDAQ1000", "NASDAQ2000", "IWM",
+    "ALL_US_LISTED",
 ]
 
 WIKI_SOURCES = {
@@ -165,9 +171,6 @@ def get_russell1000_tickers():
 
 
 def get_russell2000_tickers():
-    """Fetches live IWM (Russell 2000 ETF) holdings from iShares as the
-    Russell 2000 constituent list, instead of a local CSV that was
-    never created (previously silently returned []) on every run)."""
     def _do():
         r = _SESSION.get(IWM_HOLDINGS_URL, headers=REQUEST_HEADERS, timeout=60)
         r.raise_for_status()
@@ -244,6 +247,8 @@ def _load_nasdaq_trader_frames():
 
 
 def _all_nasdaq_exchange_symbols():
+    """Nasdaq-listed only (Exchange == 'Q') -- kept for the NASDAQ_COMPOSITE
+    index specifically, matching its name."""
     frames = _load_nasdaq_trader_frames()
     if len(frames) < 2 or frames[0].empty:
         logger.warning("NASDAQ exchange symbol lists unavailable; returning empty list.")
@@ -271,6 +276,42 @@ def _all_nasdaq_exchange_symbols():
 
 def get_nasdaq_composite_tickers():
     return _all_nasdaq_exchange_symbols()
+
+
+def _all_us_listed_symbols():
+    """Full US-listed common stock universe: nasdaqlisted.txt (all Nasdaq
+    tiers) + otherlisted.txt with NO exchange filter, i.e. NYSE, NYSE
+    American, NYSE Arca, Cboe BZX, and Nasdaq all included. This is the
+    genuinely comprehensive 'all US stocks' source."""
+    frames = _load_nasdaq_trader_frames()
+    if len(frames) < 2 or frames[0].empty:
+        logger.warning("NASDAQ Trader listing files unavailable; ALL_US_LISTED empty.")
+        return []
+    nasdaqlisted, otherlisted = frames[0].copy(), frames[1].copy()
+
+    nl = nasdaqlisted.copy()
+    if 'Test Issue' in nl.columns:
+        nl = nl[nl['Test Issue'].astype(str).str.upper() != 'Y']
+    if 'ETF' in nl.columns:
+        nl = nl[nl['ETF'].astype(str).str.upper() != 'Y']
+    nl_syms = nl['Symbol'].tolist() if 'Symbol' in nl.columns else []
+
+    ol = otherlisted.copy()
+    if 'Test Issue' in ol.columns:
+        ol = ol[ol['Test Issue'].astype(str).str.upper() != 'Y']
+    if 'ETF' in ol.columns:
+        ol = ol[ol['ETF'].astype(str).str.upper() != 'Y']
+    # No Exchange filter here -- keeps NYSE/NYSE American/NYSE Arca/Cboe BZX too.
+    symcol = 'NASDAQ Symbol' if 'NASDAQ Symbol' in ol.columns else ('Symbol' if 'Symbol' in ol.columns else None)
+    ol_syms = ol[symcol].tolist() if symcol else []
+
+    combined = _clean_symbols(nl_syms + ol_syms)
+    logger.info(f"ALL_US_LISTED resolved {len(combined)} tickers across all US exchanges.")
+    return combined
+
+
+def get_all_us_listed_tickers():
+    return _all_us_listed_symbols()
 
 
 def _yf_download_safe(tickers, **kwargs):
@@ -341,6 +382,7 @@ def resolve_index_map(target_indexes=None):
         'NASDAQ1000': get_nasdaq1000_tickers,
         'NASDAQ2000': get_nasdaq2000_tickers,
         'IWM': get_iwm_tickers,
+        'ALL_US_LISTED': get_all_us_listed_tickers,
     }
     requested = target_indexes or INDEX_ORDER
     idx = {}
@@ -444,14 +486,31 @@ def _patched_fundamental_strength(ticker):
     return label, " | ".join(detail) if detail else "No data"
 
 
-def run_one_index(index_name, tickers, output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
-    tickers = _clean_symbols(tickers)
-    out_dir = os.path.join(output_root, index_name)
-    os.makedirs(out_dir, exist_ok=True)
-    rows = []
-    logger.info(f"=== {index_name}: {len(tickers)} tickers ===")
+def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
+    ew.yf.download = _patched_download
+    ew.fundamental_strength = _patched_fundamental_strength
+
+    index_map = resolve_index_map()
+    all_unique = _clean_symbols(sorted({s for vals in index_map.values() for s in vals}))
+    logger.info(f'Total unique tickers across all indexes (deduplicated): {len(all_unique)}')
+
+    logger.info('Prefetching price history...')
+    _prefetch_prices(all_unique)
+
+    logger.info('Prefetching fast fundamental info (throttled)...')
+    _prefetch_fast_info(all_unique)
+
+    # Reverse map: ticker -> set of index names it belongs to
+    ticker_to_indexes = {}
+    for name, tickers in index_map.items():
+        for t in tickers:
+            ticker_to_indexes.setdefault(t, set()).add(name)
+
+    # --- SINGLE global analysis pass: every unique ticker analyzed exactly once ---
+    logger.info(f"Analyzing {len(all_unique)} unique tickers (single pass, zero duplication)...")
+    unique_rows = {}
     with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(ew.analyze_ticker, t): t for t in tickers}
+        future_map = {executor.submit(ew.analyze_ticker, t): t for t in all_unique}
         done = 0
         for future in cf.as_completed(future_map):
             t = future_map[future]
@@ -460,60 +519,49 @@ def run_one_index(index_name, tickers, output_root=DEFAULT_OUTPUT_ROOT, max_work
                 row = future.result()
                 if row:
                     row = dict(row)
-                    row['Source_Index'] = index_name
-                    rows.append(row)
-                if done % 25 == 0 or done == len(tickers):
-                    logger.info(f"  {index_name}: {done}/{len(tickers)} complete")
+                    row['Source_Index'] = ','.join(sorted(ticker_to_indexes.get(t, set())))
+                    unique_rows[t] = row
+                if done % 100 == 0 or done == len(all_unique):
+                    logger.info(f"  Global analysis: {done}/{len(all_unique)} complete")
             except Exception as exc:
-                logger.warning(f"  {index_name}: {t} failed: {exc}")
-    if not rows:
-        return pd.DataFrame(), None, None
-    df = pd.DataFrame(rows)
+                logger.warning(f"  {t} failed: {exc}")
+
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_path = os.path.join(out_dir, f'{index_name}_Elliott_Wave_Signals_{ts}.csv')
-    xlsx_path = os.path.join(out_dir, f'{index_name}_Elliott_Wave_Signals_{ts}.xlsx')
-    df.to_csv(csv_path, index=False)
-    ew.write_excel(df, xlsx_path)
-    return df, csv_path, xlsx_path
-
-
-def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
-    ew.yf.download = _patched_download
-    ew.fundamental_strength = _patched_fundamental_strength
-
-    index_map = resolve_index_map()
-    all_unique = _clean_symbols(sorted({s for vals in index_map.values() for s in vals}))
-    logger.info(f'Total unique tickers across requested indexes: {len(all_unique)}')
-
-    logger.info('Prefetching price history...')
-    _prefetch_prices(all_unique)
-
-    logger.info('Prefetching fast fundamental info (throttled)...')
-    _prefetch_fast_info(all_unique)
-
     results = {}
-    combined = []
     manifest_rows = []
+
+    # Per-index outputs are built by SLICING the already-computed unique_rows,
+    # never re-analyzing -- this is what eliminates redundant compute.
     for name in INDEX_ORDER:
         tickers = index_map.get(name, [])
         if not tickers:
             logger.warning(f"No tickers resolved for {name}; skipping.")
             continue
-        df, csv_path, xlsx_path = run_one_index(name, tickers, output_root=output_root, max_workers=max_workers)
+        out_dir = os.path.join(output_root, name)
+        os.makedirs(out_dir, exist_ok=True)
+        rows = [unique_rows[t] for t in tickers if t in unique_rows]
+        df = pd.DataFrame(rows) if rows else pd.DataFrame()
+        csv_path = xlsx_path = None
+        if not df.empty:
+            csv_path = os.path.join(out_dir, f'{name}_Elliott_Wave_Signals_{ts}.csv')
+            xlsx_path = os.path.join(out_dir, f'{name}_Elliott_Wave_Signals_{ts}.xlsx')
+            df.to_csv(csv_path, index=False)
+            ew.write_excel(df, xlsx_path)
         results[name] = {'rows': len(df), 'csv': csv_path, 'xlsx': xlsx_path, 'tickers': len(tickers)}
         manifest_rows.append({'Index': name, 'Input_Tickers': len(tickers), 'Output_Rows': len(df),
                                'CSV_Path': csv_path, 'XLSX_Path': xlsx_path})
-        if not df.empty:
-            combined.append(df)
 
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     combined_dir = os.path.join(output_root, 'COMBINED_ALL_INDEXES')
     os.makedirs(combined_dir, exist_ok=True)
     manifest_path = os.path.join(combined_dir, f'INDEX_RUN_MANIFEST_{ts}.csv')
     pd.DataFrame(manifest_rows).to_csv(manifest_path, index=False)
 
-    if combined:
-        combined_df = pd.concat(combined, ignore_index=True)
+    combined_xlsx = None
+    combined_csv = None
+
+    if unique_rows:
+        # Already deduplicated by construction -- one dict entry per ticker.
+        combined_df = pd.DataFrame(list(unique_rows.values()))
         import glob
         base_filename = "Elliott_Wave_NASDAQ_Composite_Master_Workbook"
         extension = ".xlsx"
@@ -536,12 +584,11 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
         combined_df.to_csv(combined_csv, index=False)
         combined_xlsx = new_filename
         ew.write_excel(combined_df, combined_xlsx)
-        logger.info(f"Successfully saved versioned master file: {combined_xlsx}")
+        logger.info(f"Successfully saved versioned master file: {combined_xlsx} "
+                    f"({len(combined_df)} unique tickers, zero duplicates).")
     else:
         combined_df = pd.DataFrame()
-        combined_csv = None
-        combined_xlsx = None
-        logger.error("No data collected from ANY index — check network/rate-limit warnings above.")
+        logger.error("No data collected — check network/rate-limit warnings above.")
 
     if combined_xlsx is None:
         logger.error("No workbook was generated this run — every index came back empty. "
@@ -554,6 +601,7 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
         'combined_xlsx': combined_xlsx,
         'manifest_csv': manifest_path,
         'indexes': results,
+        'total_unique_tickers': len(unique_rows),
     }
     summary_json = os.path.join(combined_dir, f'RUN_SUMMARY_{ts}.json')
     with open(summary_json, 'w', encoding='utf-8') as f:
