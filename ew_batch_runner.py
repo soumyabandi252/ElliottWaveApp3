@@ -1,33 +1,44 @@
 """
 Performance-optimized batch/index runner for the Elliott Wave engine.
-v4 — adds NASDAQ Trader fetch caching on top of everything in v3.
+v5 -- hardens fundamentals lookup so a fundamentals failure can NEVER
+cause a ticker's row to be excluded from output, and adds a diagnostic
+pass that reports exactly how many/which tickers were dropped for
+reasons OTHER than fundamentals (so a low row count can be triaged
+quickly instead of guessed at).
 
-All prior fixes retained:
-  - Cross-platform output path.
-  - Shared curl_cffi session for all network calls.
-  - Retry-with-backoff on every external call.
-  - Throttled concurrency for fast_info prefetch.
-  - Soft-fail per index source (one bad source doesn't kill the run).
-  - Russell 2000 via live iShares IWM holdings CSV (no local file needed).
-  - ALL_US_LISTED: full US exchange coverage (NYSE/NYSE American/NYSE
-    Arca/Cboe BZX/Nasdaq), not just Nasdaq-only.
-  - Single-pass global analysis: every unique ticker analyzed EXACTLY
-    ONCE regardless of how many indexes it belongs to -- eliminates
-    duplicate rows in the combined output by construction, and avoids
-    wasted recomputation.
-  - run_all_indexes() raises if no workbook is produced (protects git
-    history from the earlier self-deletion bug).
+All prior fixes retained (from v4):
+- Cross-platform output path.
+- Shared curl_cffi session for all network calls.
+- Retry-with-backoff on every external call.
+- Throttled concurrency for fast_info prefetch.
+- Soft-fail per index source (one bad source doesn't kill the run).
+- Russell 2000 via live iShares IWM holdings CSV (no local file needed).
+- ALL_US_LISTED: full US exchange coverage (NYSE/NYSE American/NYSE
+  Arca/Cboe BZX/Nasdaq), not just Nasdaq-only.
+- Single-pass global analysis: every unique ticker analyzed EXACTLY
+  ONCE regardless of how many indexes it belongs to -- eliminates
+  duplicate rows in the combined output by construction, and avoids
+  wasted recomputation.
+- run_all_indexes() raises if no workbook is produced (protects git
+  history from the earlier self-deletion bug).
+- _load_nasdaq_trader_frames() is cached at module level
+  (_NASDAQ_TRADER_CACHE) so the network fetch happens ONCE per run,
+  no matter how many callers (NASDAQ_COMPOSITE, NASDAQ1000, NASDAQ2000,
+  ALL_US_LISTED) need this data.
 
-NEW in v4:
-  - _load_nasdaq_trader_frames() is now cached at module level
-    (_NASDAQ_TRADER_CACHE). Previously this fetched the same two NASDAQ
-    Trader files (nasdaqlisted.txt, otherlisted.txt) fresh on EVERY call
-    -- and it was called 4 separate times per run (NASDAQ_COMPOSITE,
-    NASDAQ1000, NASDAQ2000, ALL_US_LISTED), hitting the same external
-    endpoint repeatedly in quick succession. That repeat-hit pattern is
-    a common trigger for short-window IP rate limiting. Now the actual
-    network fetch happens once per run; every caller reuses the cached
-    result.
+NEW in v5:
+- _patched_fundamental_strength() is now wrapped in a top-level
+  try/except so it is GUARANTEED to never raise -- any failure (fetch
+  error, missing/bad field while scoring, etc.) degrades to an
+  "UNKNOWN (data error)" label written into the output row instead of
+  bubbling up and causing analyze_ticker() to fail, which would have
+  silently dropped that ticker's entire row from every output file.
+- Added _diagnose_dropped_tickers(), called right after the global
+  analysis pass, which logs exactly which/how many tickers produced
+  no row at all. Since fundamentals can no longer be the cause, any
+  ticker in that dropped list failed inside the Elliott Wave engine's
+  own analyze_ticker() (e.g. insufficient price history) or was never
+  resolved by the upstream ticker-list sources in the first place.
 """
 import requests
 import io
@@ -399,6 +410,7 @@ def resolve_index_map(target_indexes=None):
         'IWM': get_iwm_tickers,
         'ALL_US_LISTED': get_all_us_listed_tickers,
     }
+
     requested = target_indexes or INDEX_ORDER
     idx = {}
     for name in requested:
@@ -462,43 +474,80 @@ def _prefetch_fast_info(tickers, max_workers=6, pause_between_batches=2.0, batch
 
 
 def _patched_fundamental_strength(ticker):
-    if not ew.YF_AVAILABLE:
-        return "UNKNOWN (yfinance not installed)", "run: pip install yfinance"
-    info = _INFO_CACHE.get(ticker)
-    if not info:
-        try:
-            info = dict(yf.Ticker(ticker, session=_SESSION).fast_info)
-            _INFO_CACHE[ticker] = info
-        except Exception as exc:
-            return "UNKNOWN (data error)", str(exc)
-    pe = info.get('trailingPE') or info.get('forwardPE')
-    roe = info.get('returnOnEquity')
-    rev_growth = info.get('revenueGrowth')
-    de = info.get('debtToEquity')
-    profit_margin = info.get('profitMargins')
-    score, detail = 0, []
-    if pe and 0 < pe < 35:
-        score += 1; detail.append(f"PE={round(pe,1)} [healthy]")
-    elif pe:
-        detail.append(f"PE={round(pe,1)} [elevated]")
-    if roe and roe > 0.10:
-        score += 1; detail.append(f"ROE={round(roe*100,1)}% [>10%]")
-    elif roe:
-        detail.append(f"ROE={round(roe*100,1)}% [low]")
-    if rev_growth and rev_growth > 0:
-        score += 1; detail.append(f"RevGrowth={round(rev_growth*100,1)}% [positive]")
-    elif rev_growth:
-        detail.append(f"RevGrowth={round(rev_growth*100,1)}% [negative]")
-    if de and de < 150:
-        score += 1; detail.append(f"D/E={round(de,1)} [manageable]")
-    elif de:
-        detail.append(f"D/E={round(de,1)} [elevated]")
-    if profit_margin and profit_margin > 0:
-        score += 1; detail.append(f"Margin={round(profit_margin*100,1)}% [profitable]")
-    elif profit_margin:
-        detail.append(f"Margin={round(profit_margin*100,1)}% [loss]")
-    label = ("FUNDAMENTALLY STRONG" if score >= 4 else ("MODERATE" if score >= 2 else "FUNDAMENTALLY WEAK"))
-    return label, " | ".join(detail) if detail else "No data"
+    """v5 hardened: GUARANTEED to never raise. Any failure -- fetch
+    error, missing field, unexpected type while scoring -- degrades to
+    an 'UNKNOWN (data error)' label instead of propagating an exception
+    up into analyze_ticker() / run_all_indexes(), which would otherwise
+    cause the entire ticker row to be silently dropped from every
+    output file (per-index CSV/XLSX + combined workbook)."""
+    try:
+        if not ew.YF_AVAILABLE:
+            return "UNKNOWN (yfinance not installed)", "run: pip install yfinance"
+
+        info = _INFO_CACHE.get(ticker)
+        if not info:
+            try:
+                info = dict(yf.Ticker(ticker, session=_SESSION).fast_info)
+                _INFO_CACHE[ticker] = info
+            except Exception as exc:
+                return "UNKNOWN (data error)", f"fetch failed: {exc}"
+
+        pe = info.get('trailingPE') or info.get('forwardPE')
+        roe = info.get('returnOnEquity')
+        rev_growth = info.get('revenueGrowth')
+        de = info.get('debtToEquity')
+        profit_margin = info.get('profitMargins')
+
+        score, detail = 0, []
+        if pe and 0 < pe < 35:
+            score += 1; detail.append(f"PE={round(pe,1)} [healthy]")
+        elif pe:
+            detail.append(f"PE={round(pe,1)} [elevated]")
+        if roe and roe > 0.10:
+            score += 1; detail.append(f"ROE={round(roe*100,1)}% [>10%]")
+        elif roe:
+            detail.append(f"ROE={round(roe*100,1)}% [low]")
+        if rev_growth and rev_growth > 0:
+            score += 1; detail.append(f"RevGrowth={round(rev_growth*100,1)}% [positive]")
+        elif rev_growth:
+            detail.append(f"RevGrowth={round(rev_growth*100,1)}% [negative]")
+        if de and de < 150:
+            score += 1; detail.append(f"D/E={round(de,1)} [manageable]")
+        elif de:
+            detail.append(f"D/E={round(de,1)} [elevated]")
+        if profit_margin and profit_margin > 0:
+            score += 1; detail.append(f"Margin={round(profit_margin*100,1)}% [profitable]")
+        elif profit_margin:
+            detail.append(f"Margin={round(profit_margin*100,1)}% [loss]")
+
+        label = ("FUNDAMENTALLY STRONG" if score >= 4 else
+                  ("MODERATE" if score >= 2 else "FUNDAMENTALLY WEAK"))
+        return label, (" | ".join(detail) if detail else "No data")
+
+    except Exception as exc:
+        # Catch-all: scoring logic itself blew up (bad field type, etc).
+        # Still degrade gracefully instead of dropping the ticker's row.
+        return "UNKNOWN (data error)", f"scoring failed: {exc}"
+
+
+def _diagnose_dropped_tickers(all_unique, unique_rows):
+    """v5 addition: run right after the global analysis pass to report
+    exactly how many/which tickers produced NO row at all. Since
+    fundamentals can no longer raise (see _patched_fundamental_strength
+    above), anything listed here failed inside ew.analyze_ticker itself
+    (e.g. insufficient price history, wave-counting error) rather than
+    being excluded due to a fundamentals lookup failure."""
+    dropped = [t for t in all_unique if t not in unique_rows]
+    if dropped:
+        logger.warning(
+            f"[DIAGNOSTIC] {len(dropped)}/{len(all_unique)} tickers produced NO "
+            f"row (analyze_ticker failed or returned falsy) -- NOT fundamentals-"
+            f"related, since fundamentals now always degrades gracefully. "
+            f"Sample: {dropped[:25]}"
+        )
+    else:
+        logger.info("[DIAGNOSTIC] Every analyzed ticker produced a row -- no drops.")
+    return dropped
 
 
 def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
@@ -534,10 +583,12 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
                     row = dict(row)
                     row['Source_Index'] = ','.join(sorted(ticker_to_indexes.get(t, set())))
                     unique_rows[t] = row
-                if done % 100 == 0 or done == len(all_unique):
-                    logger.info(f"  Global analysis: {done}/{len(all_unique)} complete")
             except Exception as exc:
                 logger.warning(f"  {t} failed: {exc}")
+            if done % 100 == 0 or done == len(all_unique):
+                logger.info(f"  Global analysis: {done}/{len(all_unique)} complete")
+
+    _diagnose_dropped_tickers(all_unique, unique_rows)
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     results = {}
@@ -598,11 +649,11 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
                     f"({len(combined_df)} unique tickers, zero duplicates).")
     else:
         combined_df = pd.DataFrame()
-        logger.error("No data collected — check network/rate-limit warnings above.")
+        logger.error("No data collected \u2014 check network/rate-limit warnings above.")
 
     if combined_xlsx is None:
-        logger.error("No workbook was generated this run — every index came back empty. "
-                     "Aborting so CI does not commit a deletion of the last good workbook.")
+        logger.error("No workbook was generated this run \u2014 every index came back empty. "
+                      "Aborting so CI does not commit a deletion of the last good workbook.")
         raise RuntimeError("No data produced by any index; refusing to proceed without a valid workbook.")
 
     summary = {
@@ -613,6 +664,7 @@ def run_all_indexes(output_root=DEFAULT_OUTPUT_ROOT, max_workers=12):
         'indexes': results,
         'total_unique_tickers': len(unique_rows),
     }
+
     summary_json = os.path.join(combined_dir, f'RUN_SUMMARY_{ts}.json')
     with open(summary_json, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
