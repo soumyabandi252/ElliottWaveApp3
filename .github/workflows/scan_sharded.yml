@@ -27,6 +27,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Persistent incremental price cache -- survives across workflow
+      # runs (not just within one run). This is what lets each run
+      # after the first only fetch ~15 days of new data per ticker
+      # instead of 10 years, cutting Yahoo Finance request volume by
+      # roughly 100x and reducing how often we get rate-limited at all.
+      - name: Restore price cache
+        uses: actions/cache@v4
+        with:
+          path: ELL_Output/PRICE_CACHE
+          key: price-cache-shard-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: |
+            price-cache-shard-${{ matrix.shard }}-
+
       - name: Run shard ${{ matrix.shard }}
         run: python ew_batch_runner_sharded.py --shard-index ${{ matrix.shard }} --shard-count 8 --stagger-sec 40
 

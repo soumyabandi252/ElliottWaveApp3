@@ -1,33 +1,31 @@
 """
-ew_batch_runner_sharded.py  (v2 -- diagnostic + rate-limit resilient)
+ew_batch_runner_sharded.py  (v3 -- persistent incremental price cache
++ 429-aware cooldown)
 ======================================================================
-v1 fixed the "dies partway through the alphabet" bug by sharding, but
-introduced a NEW failure mode: 8 shards launching near-simultaneously
-from GitHub's shared runner IP pool triggered aggressive rate-limiting
-from Yahoo Finance / NASDAQ Trader, so every shard silently ended up
-with zero rows -- no exception, no artifact, just an empty success
-that only surfaced downstream as a confusing "no shard outputs found"
-error in the merge job.
+v2 fixed the silent-empty-shard problem with staggering + louder
+retries + diagnostics. v3 attacks the root cause of the rate-limiting
+itself instead of just surviving it better:
 
-v2 changes:
-1. STAGGERED START -- each shard sleeps (shard_index * 25s) before
-   making its first network call, so 8 jobs don't all slam the same
-   endpoints in the same second.
-2. LOUDER RETRY (tuned back up for real rate-limit survival) --
-   base_delay=4.0s, max_retries=5 specifically for yfinance calls
-   (NASDAQ Trader/Wikipedia calls keep a lighter retry since those
-   are one-shot per shard, not thousands of calls).
-3. FAIL LOUDLY INSTEAD OF SILENTLY -- if the ticker universe resolves
-   to zero symbols, or if analysis produces zero total rows, the
-   shard now (a) still writes whatever CSV it has (even if just
-   headers, so the artifact exists and is inspectable) and then
-   (b) raises a RuntimeError with clear diagnostics, so the GitHub
-   Actions job shows a red X with a real reason instead of a quiet
-   fake-success that only breaks things two jobs later in `merge`.
-4. CACHE-HIT DIAGNOSTICS -- after price prefetch, logs what fraction
-   of tickers actually got usable price data. A very low hit rate
-   (<10%) is a strong signal of IP-level rate limiting/blocking and
-   is called out explicitly in the log and in the raised error.
+1. PERSISTENT INCREMENTAL PRICE CACHE -- the old runner re-downloaded
+   10 YEARS of daily history for every ticker on every single run.
+   That's the single biggest driver of request volume against Yahoo
+   Finance. v3 caches each ticker's full history to disk
+   (ELL_Output/PRICE_CACHE/<ticker>.csv) and, on every subsequent run,
+   only fetches the last ~15 days incrementally and appends/merges
+   that onto the cached history. First run per ticker is still a full
+   10y pull; every run after that is ~100x less data for that ticker.
+   Paired with actions/cache in the workflow (see scan_sharded.yml),
+   this cache persists ACROSS workflow runs, not just within one.
+
+2. 429-AWARE COOLDOWN -- previously every failure (network blip,
+   timeout, real rate limit) got the same backoff treatment. v3
+   detects HTTP 429 / "Too Many Requests" specifically and, the
+   first time it's seen in a run, forces one long cooldown pause
+   (default 90s) before continuing -- rather than repeatedly hammering
+   a server that just told us to back off.
+
+Everything from v2 (staggered shard start, per-shard checkpointing,
+loud failure on zero rows, cache-hit-rate diagnostics) is retained.
 """
 import argparse
 import io
@@ -54,9 +52,14 @@ _SESSION = curl_requests.Session(impersonate="chrome")
 _DATA_CACHE = {}
 _INFO_CACHE = {}
 _NASDAQ_TRADER_CACHE = None
+_RATE_LIMIT_COOLDOWN_USED = False  # only force the long cooldown once per shard run
 
 OUTPUT_ROOT = os.environ.get("ELL_OUTPUT_ROOT", str(Path.cwd() / "ELL_Output"))
 SHARD_DIR = os.path.join(OUTPUT_ROOT, "SHARDS")
+PRICE_CACHE_DIR = os.path.join(OUTPUT_ROOT, "PRICE_CACHE")
+
+RATE_LIMIT_COOLDOWN_SEC = 90
+INCREMENTAL_LOOKBACK_DAYS = 15  # re-fetch this many trailing days for tickers with an existing cache
 
 WIKI_SOURCES = {
     "SP500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
@@ -81,11 +84,39 @@ REQUEST_HEADERS = {
 }
 
 
+def _is_rate_limit_error(exc):
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "too many requests" in msg
+        or "rate limit" in msg
+        or "rate-limit" in msg
+    )
+
+
+def _maybe_cooldown(exc):
+    """The first time we see a real rate-limit signal in this shard
+    run, force one long pause instead of just the usual short retry
+    backoff. Subsequent rate-limit hits fall back to normal retry
+    behavior so a genuinely broken run doesn't stall forever."""
+    global _RATE_LIMIT_COOLDOWN_USED
+    if _is_rate_limit_error(exc) and not _RATE_LIMIT_COOLDOWN_USED:
+        _RATE_LIMIT_COOLDOWN_USED = True
+        logger.warning(
+            f"Detected a rate-limit signal ({exc}). Forcing a one-time "
+            f"{RATE_LIMIT_COOLDOWN_SEC}s cooldown before continuing."
+        )
+        time.sleep(RATE_LIMIT_COOLDOWN_SEC)
+        return True
+    return False
+
+
 def _with_retry(fn, *args, max_retries=3, base_delay=2.0, label="", **kwargs):
     for attempt in range(1, max_retries + 1):
         try:
             return fn(*args, **kwargs)
         except Exception as e:
+            _maybe_cooldown(e)
             if attempt == max_retries:
                 logger.warning(f"[{label}] failed after {max_retries} attempts: {e}")
                 raise
@@ -94,9 +125,6 @@ def _with_retry(fn, *args, max_retries=3, base_delay=2.0, label="", **kwargs):
 
 
 def _with_retry_yf(fn, *args, label="", **kwargs):
-    """Heavier retry specifically for Yahoo Finance calls, since those
-    are the ones actually hammered thousands of times per shard and
-    the ones most likely to get rate-limited under parallel load."""
     return _with_retry(fn, *args, max_retries=5, base_delay=4.0, label=label, **kwargs)
 
 
@@ -219,32 +247,119 @@ def _yf_download_safe(tickers, **kwargs):
     return _with_retry_yf(_do, label=f"yf.download:{label}")
 
 
-def _prefetch_prices(tickers, period="10y", interval="1d", chunk_size=100, pause_sec=2.0):
+# ---------------------------------------------------------------------
+# Persistent per-ticker price cache
+# ---------------------------------------------------------------------
+def _cache_path(ticker):
+    os.makedirs(PRICE_CACHE_DIR, exist_ok=True)
+    return os.path.join(PRICE_CACHE_DIR, f"{ticker}.csv")
+
+
+def _load_cached_history(ticker):
+    path = _cache_path(ticker)
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path, index_col=0, parse_dates=True)
+        if df.empty:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _save_cached_history(ticker, df):
+    if df is None or df.empty:
+        return
+    try:
+        df.to_csv(_cache_path(ticker))
+    except Exception as e:
+        logger.warning(f"Failed to write price cache for {ticker}: {e}")
+
+
+def _merge_history(old_df, new_df):
+    if old_df is None or old_df.empty:
+        return new_df
+    if new_df is None or new_df.empty:
+        return old_df
+    combined = pd.concat([old_df, new_df])
+    combined = combined[~combined.index.duplicated(keep="last")]
+    combined = combined.sort_index()
+    return combined
+
+
+def _split_tickers_by_cache_state(tickers):
+    """Returns (need_full_history, need_incremental_only)."""
+    need_full, need_incremental = [], []
+    for t in tickers:
+        cached = _load_cached_history(t)
+        if cached is None or cached.empty:
+            need_full.append(t)
+        else:
+            need_incremental.append(t)
+    return need_full, need_incremental
+
+
+def _prefetch_prices(tickers, chunk_size=100, pause_sec=2.0):
+    """Fetches full 10y history only for tickers with no cache yet;
+    for everything else, fetches just the trailing incremental window
+    and merges it onto the cached history. This is the change that
+    cuts total request *volume* against Yahoo Finance by roughly
+    100x on any run after the first, regardless of IP/rate-limit
+    mitigations."""
     total = len(tickers)
     hit = 0
-    for i in range(0, total, chunk_size):
-        chunk = tickers[i:i + chunk_size]
-        logger.info(f"[PRICE PREFETCH] {i+1}-{i+len(chunk)} / {total}")
+
+    need_full, need_incremental = _split_tickers_by_cache_state(tickers)
+    logger.info(f"[PRICE PREFETCH] {len(need_full)} tickers need full history (no cache yet), "
+                f"{len(need_incremental)} tickers get incremental-only refresh (cached).")
+
+    def _fetch_batch(batch, period):
         try:
-            data = _yf_download_safe(chunk, period=period, interval=interval,
+            data = _yf_download_safe(batch, period=period, interval="1d",
                                       group_by="ticker", threads=True,
                                       progress=False, auto_adjust=True)
-            if len(chunk) == 1:
-                sub = data.dropna(how="all")
-                if not sub.empty:
-                    _DATA_CACHE[chunk[0]] = sub
-                    hit += 1
-            else:
-                for t in chunk:
-                    try:
-                        sub = data[t].dropna(how="all")
-                        if not sub.empty:
-                            _DATA_CACHE[t] = sub
-                            hit += 1
-                    except Exception:
-                        continue
         except Exception as exc:
-            logger.warning(f"  price chunk failed, skipping {len(chunk)} tickers: {exc}")
+            logger.warning(f"  price chunk failed ({period}), skipping {len(batch)} tickers: {exc}")
+            return {}
+        out = {}
+        for t in batch:
+            try:
+                sub = data[t].dropna(how="all") if len(batch) > 1 else data.dropna(how="all")
+                if not sub.empty:
+                    out[t] = sub
+            except Exception:
+                continue
+        return out
+
+    # Full-history fetches (new tickers only)
+    for i in range(0, len(need_full), chunk_size):
+        chunk = need_full[i:i + chunk_size]
+        logger.info(f"[PRICE PREFETCH:FULL] {i+1}-{i+len(chunk)} / {len(need_full)}")
+        fetched = _fetch_batch(chunk, "10y")
+        for t, df in fetched.items():
+            _DATA_CACHE[t] = df
+            _save_cached_history(t, df)
+            hit += 1
+        time.sleep(pause_sec)
+
+    # Incremental fetches (cached tickers -- only need recent days)
+    incr_period = f"{INCREMENTAL_LOOKBACK_DAYS}d"
+    for i in range(0, len(need_incremental), chunk_size):
+        chunk = need_incremental[i:i + chunk_size]
+        logger.info(f"[PRICE PREFETCH:INCREMENTAL] {i+1}-{i+len(chunk)} / {len(need_incremental)}")
+        fetched = _fetch_batch(chunk, incr_period)
+        for t in chunk:
+            cached = _load_cached_history(t)
+            new_bit = fetched.get(t)
+            merged = _merge_history(cached, new_bit)
+            if merged is not None and not merged.empty:
+                _DATA_CACHE[t] = merged
+                _save_cached_history(t, merged)
+                hit += 1
+            elif cached is not None and not cached.empty:
+                _DATA_CACHE[t] = cached
+                hit += 1
         time.sleep(pause_sec)
 
     hit_rate = (hit / total * 100.0) if total else 0.0
@@ -253,9 +368,7 @@ def _prefetch_prices(tickers, period="10y", interval="1d", chunk_size=100, pause
         logger.warning(
             "PRICE PREFETCH HIT RATE IS SUSPICIOUSLY LOW (<10%). This strongly "
             "suggests Yahoo Finance is rate-limiting/blocking this runner's IP "
-            "rather than individual tickers having no data. Consider: reducing "
-            "matrix parallelism, adding start-time stagger, or running on a "
-            "self-hosted runner with a stable IP."
+            "rather than individual tickers having no data."
         )
     return hit, total
 
@@ -266,7 +379,8 @@ def _prefetch_fast_info(tickers, max_workers=16, pause_between_batches=1.0, batc
             fi = dict(yf.Ticker(t, session=_SESSION).fast_info)
             _INFO_CACHE[t] = fi
             return True
-        except Exception:
+        except Exception as e:
+            _maybe_cooldown(e)
             return False
 
     for i in range(0, len(tickers), batch_size):
@@ -351,7 +465,7 @@ def _save_checkpoint(path, done_tickers):
 def run_shard(shard_index, shard_count, max_workers=24, stagger_sec=25):
     if stagger_sec and shard_count > 1:
         delay = shard_index * stagger_sec
-        logger.info(f"Staggering shard {shard_index} start by {delay}s to avoid a synchronized burst against Yahoo Finance/NASDAQ Trader.")
+        logger.info(f"Staggering shard {shard_index} start by {delay}s.")
         time.sleep(delay)
 
     ew.yf.download = _patched_download
@@ -367,11 +481,8 @@ def run_shard(shard_index, shard_count, max_workers=24, stagger_sec=25):
     if total_universe == 0:
         pd.DataFrame(columns=["Symbol"]).to_csv(csv_path, index=False)
         raise RuntimeError(
-            "Ticker universe resolved to ZERO symbols (both NASDAQ Trader and the "
-            "Wikipedia fallback failed). This is almost certainly a network-level "
-            "block on this runner's IP, not a code bug. Wrote an empty placeholder "
-            "CSV so the artifact upload step doesn't error, but this shard produced "
-            "no usable data."
+            "Ticker universe resolved to ZERO symbols. Wrote an empty placeholder "
+            "CSV so artifact upload doesn't error, but this shard produced no data."
         )
 
     my_tickers = [t for i, t in enumerate(all_tickers) if i % shard_count == shard_index]
@@ -392,9 +503,9 @@ def run_shard(shard_index, shard_count, max_workers=24, stagger_sec=25):
     new_rows = []
     hit = total = 0
     if remaining:
-        logger.info("Prefetching price history for remaining tickers...")
+        logger.info("Prefetching price history (full for new tickers, incremental for cached ones)...")
         hit, total = _prefetch_prices(remaining)
-        logger.info("Prefetching fast fundamental info for remaining tickers...")
+        logger.info("Prefetching fast fundamental info...")
         _prefetch_fast_info(remaining)
 
         with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -435,11 +546,8 @@ def run_shard(shard_index, shard_count, max_workers=24, stagger_sec=25):
         raise RuntimeError(
             f"Shard {shard_index}/{shard_count} analyzed {len(remaining)} tickers but "
             f"produced ZERO valid rows (price cache hit rate was {hit}/{total}). "
-            "This is almost certainly Yahoo Finance rate-limiting/blocking this "
-            "runner's requests, not a code bug. A placeholder CSV was written so "
-            "the artifact upload step succeeds, but this shard's data is empty. "
-            "Re-run with fewer parallel shards (lower matrix parallelism) or add "
-            "a longer stagger_sec, or run on a self-hosted runner with a stable IP."
+            "Likely still rate-limited even with incremental fetch + cooldown. "
+            "A placeholder CSV was written so artifact upload succeeds."
         )
 
     return csv_path
