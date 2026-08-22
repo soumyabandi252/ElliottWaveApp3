@@ -1,47 +1,33 @@
 """
-ew_batch_runner_sharded.py
-===========================
-Fixes the "only ~226 tickers processed" bug in the original
-ew_batch_runner.py by making the scan:
+ew_batch_runner_sharded.py  (v2 -- diagnostic + rate-limit resilient)
+======================================================================
+v1 fixed the "dies partway through the alphabet" bug by sharding, but
+introduced a NEW failure mode: 8 shards launching near-simultaneously
+from GitHub's shared runner IP pool triggered aggressive rate-limiting
+from Yahoo Finance / NASDAQ Trader, so every shard silently ended up
+with zero rows -- no exception, no artifact, just an empty success
+that only surfaced downstream as a confusing "no shard outputs found"
+error in the merge job.
 
-1. SHARDABLE -- the full US-listed ticker universe (thousands of
-   symbols) is split into N equal shards. Each shard runs as its own
-   GitHub Actions matrix job in parallel, so instead of one job
-   crawling the entire alphabet serially (and dying partway through
-   the "A" tickers when it runs out of time), N jobs each cover a
-   fraction of the alphabet and finish comfortably within the
-   runner's time limit.
-
-2. CHECKPOINTED -- each shard writes its progress to a local JSON
-   checkpoint file after every ticker. If a shard is interrupted
-   (timeout, rate limit storm, spot-instance eviction, etc.) it
-   resumes from the checkpoint on the next run instead of starting
-   over from scratch.
-
-3. FASTER PER-TICKER RETRY -- the original retry backoff
-   (base_delay=8.0s, up to 4 attempts => up to ~64s+jitter per
-   failing call) made a universe-wide rate-limit episode balloon
-   total runtime by 10-50x. This version uses a much cheaper backoff
-   (base_delay=1.5s, max 3 attempts) so failing tickers get skipped
-   quickly instead of stalling the whole shard.
-
-4. HIGHER CONCURRENCY -- ThreadPoolExecutor worker counts raised from
-   6-12 to 24-32, since yfinance/NASDAQ Trader tolerate meaningfully
-   higher parallel read volume than the original conservative
-   settings assumed.
-
-Usage (single machine, all tickers, no sharding):
-    python ew_batch_runner_sharded.py --shard-index 0 --shard-count 1
-
-Usage (GitHub Actions matrix, 8 parallel shards):
-    python ew_batch_runner_sharded.py --shard-index ${{ matrix.shard }} --shard-count 8
-
-Each shard writes:
-    ELL_Output/SHARDS/shard_<index>_of_<count>.csv
-    ELL_Output/SHARDS/shard_<index>_of_<count>.checkpoint.json
-
-A separate merge_shards.py combines all shard CSVs into the final
-master workbook (see that file for details).
+v2 changes:
+1. STAGGERED START -- each shard sleeps (shard_index * 25s) before
+   making its first network call, so 8 jobs don't all slam the same
+   endpoints in the same second.
+2. LOUDER RETRY (tuned back up for real rate-limit survival) --
+   base_delay=4.0s, max_retries=5 specifically for yfinance calls
+   (NASDAQ Trader/Wikipedia calls keep a lighter retry since those
+   are one-shot per shard, not thousands of calls).
+3. FAIL LOUDLY INSTEAD OF SILENTLY -- if the ticker universe resolves
+   to zero symbols, or if analysis produces zero total rows, the
+   shard now (a) still writes whatever CSV it has (even if just
+   headers, so the artifact exists and is inspectable) and then
+   (b) raises a RuntimeError with clear diagnostics, so the GitHub
+   Actions job shows a red X with a real reason instead of a quiet
+   fake-success that only breaks things two jobs later in `merge`.
+4. CACHE-HIT DIAGNOSTICS -- after price prefetch, logs what fraction
+   of tickers actually got usable price data. A very low hit rate
+   (<10%) is a strong signal of IP-level rate limiting/blocking and
+   is called out explicitly in the log and in the raised error.
 """
 import argparse
 import io
@@ -50,6 +36,7 @@ import logging
 import os
 import random
 import re
+import sys
 import time
 import concurrent.futures as cf
 from pathlib import Path
@@ -94,7 +81,7 @@ REQUEST_HEADERS = {
 }
 
 
-def _with_retry(fn, *args, max_retries=3, base_delay=1.5, label="", **kwargs):
+def _with_retry(fn, *args, max_retries=3, base_delay=2.0, label="", **kwargs):
     for attempt in range(1, max_retries + 1):
         try:
             return fn(*args, **kwargs)
@@ -102,8 +89,15 @@ def _with_retry(fn, *args, max_retries=3, base_delay=1.5, label="", **kwargs):
             if attempt == max_retries:
                 logger.warning(f"[{label}] failed after {max_retries} attempts: {e}")
                 raise
-            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 2)
             time.sleep(delay)
+
+
+def _with_retry_yf(fn, *args, label="", **kwargs):
+    """Heavier retry specifically for Yahoo Finance calls, since those
+    are the ones actually hammered thousands of times per shard and
+    the ones most likely to get rate-limited under parallel load."""
+    return _with_retry(fn, *args, max_retries=5, base_delay=4.0, label=label, **kwargs)
 
 
 def _sanitize_symbol(sym):
@@ -161,9 +155,6 @@ def _load_nasdaq_trader_frames():
 
 
 def _all_us_listed_symbols():
-    """Full US-listed common-stock universe: every Nasdaq tier plus
-    NYSE/NYSE American/NYSE Arca/Cboe BZX from otherlisted.txt, no
-    exchange filter."""
     frames = _load_nasdaq_trader_frames()
     if len(frames) < 2 or frames[0].empty:
         logger.warning("NASDAQ Trader listing files unavailable; falling back to Wikipedia indexes only.")
@@ -188,6 +179,9 @@ def _all_us_listed_symbols():
 
     combined = _clean_symbols(nl_syms + ol_syms)
     logger.info(f"ALL_US_LISTED resolved {len(combined)} tickers across all US exchanges.")
+    if not combined:
+        logger.warning("NASDAQ Trader returned zero usable symbols; trying Wikipedia fallback.")
+        combined = _fallback_wiki_universe()
     return combined
 
 
@@ -209,9 +203,6 @@ def _read_html_table_symbols(url, match_columns):
 
 
 def _fallback_wiki_universe():
-    """Used only if NASDAQ Trader is completely unreachable -- keeps
-    the scan alive with a smaller but still broad universe rather than
-    producing zero rows."""
     out = []
     out += _read_html_table_symbols(WIKI_SOURCES["SP500"], ("Symbol",))
     out += _read_html_table_symbols(WIKI_SOURCES["NASDAQ100"], ("Ticker",))
@@ -225,11 +216,12 @@ def _yf_download_safe(tickers, **kwargs):
     def _do():
         return yf.download(tickers, session=_SESSION, **kwargs)
     label = tickers if isinstance(tickers, str) else f"{len(tickers)} tickers"
-    return _with_retry(_do, label=f"yf.download:{label}")
+    return _with_retry_yf(_do, label=f"yf.download:{label}")
 
 
-def _prefetch_prices(tickers, period="10y", interval="1d", chunk_size=150, pause_sec=1.0):
+def _prefetch_prices(tickers, period="10y", interval="1d", chunk_size=100, pause_sec=2.0):
     total = len(tickers)
+    hit = 0
     for i in range(0, total, chunk_size):
         chunk = tickers[i:i + chunk_size]
         logger.info(f"[PRICE PREFETCH] {i+1}-{i+len(chunk)} / {total}")
@@ -238,21 +230,37 @@ def _prefetch_prices(tickers, period="10y", interval="1d", chunk_size=150, pause
                                       group_by="ticker", threads=True,
                                       progress=False, auto_adjust=True)
             if len(chunk) == 1:
-                _DATA_CACHE[chunk[0]] = data.dropna(how="all")
+                sub = data.dropna(how="all")
+                if not sub.empty:
+                    _DATA_CACHE[chunk[0]] = sub
+                    hit += 1
             else:
                 for t in chunk:
                     try:
                         sub = data[t].dropna(how="all")
                         if not sub.empty:
                             _DATA_CACHE[t] = sub
+                            hit += 1
                     except Exception:
                         continue
         except Exception as exc:
             logger.warning(f"  price chunk failed, skipping {len(chunk)} tickers: {exc}")
         time.sleep(pause_sec)
 
+    hit_rate = (hit / total * 100.0) if total else 0.0
+    logger.info(f"[PRICE PREFETCH] cache hit rate: {hit}/{total} ({hit_rate:.1f}%)")
+    if total >= 20 and hit_rate < 10.0:
+        logger.warning(
+            "PRICE PREFETCH HIT RATE IS SUSPICIOUSLY LOW (<10%). This strongly "
+            "suggests Yahoo Finance is rate-limiting/blocking this runner's IP "
+            "rather than individual tickers having no data. Consider: reducing "
+            "matrix parallelism, adding start-time stagger, or running on a "
+            "self-hosted runner with a stable IP."
+        )
+    return hit, total
 
-def _prefetch_fast_info(tickers, max_workers=24, pause_between_batches=0.5, batch_size=150):
+
+def _prefetch_fast_info(tickers, max_workers=16, pause_between_batches=1.0, batch_size=100):
     def grab(t):
         try:
             fi = dict(yf.Ticker(t, session=_SESSION).fast_info)
@@ -340,7 +348,12 @@ def _save_checkpoint(path, done_tickers):
         json.dump({"done": sorted(done_tickers)}, f)
 
 
-def run_shard(shard_index, shard_count, max_workers=32):
+def run_shard(shard_index, shard_count, max_workers=24, stagger_sec=25):
+    if stagger_sec and shard_count > 1:
+        delay = shard_index * stagger_sec
+        logger.info(f"Staggering shard {shard_index} start by {delay}s to avoid a synchronized burst against Yahoo Finance/NASDAQ Trader.")
+        time.sleep(delay)
+
     ew.yf.download = _patched_download
     ew.fundamental_strength = _patched_fundamental_strength
 
@@ -349,10 +362,21 @@ def run_shard(shard_index, shard_count, max_workers=32):
     total_universe = len(all_tickers)
     logger.info(f"Full universe size: {total_universe} tickers.")
 
+    csv_path, checkpoint_path = _shard_paths(shard_index, shard_count)
+
+    if total_universe == 0:
+        pd.DataFrame(columns=["Symbol"]).to_csv(csv_path, index=False)
+        raise RuntimeError(
+            "Ticker universe resolved to ZERO symbols (both NASDAQ Trader and the "
+            "Wikipedia fallback failed). This is almost certainly a network-level "
+            "block on this runner's IP, not a code bug. Wrote an empty placeholder "
+            "CSV so the artifact upload step doesn't error, but this shard produced "
+            "no usable data."
+        )
+
     my_tickers = [t for i, t in enumerate(all_tickers) if i % shard_count == shard_index]
     logger.info(f"Shard {shard_index}/{shard_count}: assigned {len(my_tickers)} tickers.")
 
-    csv_path, checkpoint_path = _shard_paths(shard_index, shard_count)
     checkpoint = _load_checkpoint(checkpoint_path)
     done_set = set(checkpoint.get("done", []))
     remaining = [t for t in my_tickers if t not in done_set]
@@ -365,13 +389,14 @@ def run_shard(shard_index, shard_count, max_workers=32):
         except Exception:
             existing_rows = []
 
+    new_rows = []
+    hit = total = 0
     if remaining:
         logger.info("Prefetching price history for remaining tickers...")
-        _prefetch_prices(remaining)
+        hit, total = _prefetch_prices(remaining)
         logger.info("Prefetching fast fundamental info for remaining tickers...")
         _prefetch_fast_info(remaining)
 
-        new_rows = []
         with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(ew.analyze_ticker, t): t for t in remaining}
             done_count = 0
@@ -396,13 +421,27 @@ def run_shard(shard_index, shard_count, max_workers=32):
                         pd.DataFrame(combined).to_csv(csv_path, index=False)
 
         _save_checkpoint(checkpoint_path, done_set)
-        all_rows = existing_rows + new_rows
-    else:
-        all_rows = existing_rows
+
+    all_rows = existing_rows + new_rows
 
     if all_rows:
         pd.DataFrame(all_rows).to_csv(csv_path, index=False)
+    else:
+        pd.DataFrame(columns=["Symbol"]).to_csv(csv_path, index=False)
+
     logger.info(f"Shard {shard_index}/{shard_count} complete: {len(all_rows)} rows written to {csv_path}")
+
+    if len(all_rows) == 0 and len(remaining) > 0:
+        raise RuntimeError(
+            f"Shard {shard_index}/{shard_count} analyzed {len(remaining)} tickers but "
+            f"produced ZERO valid rows (price cache hit rate was {hit}/{total}). "
+            "This is almost certainly Yahoo Finance rate-limiting/blocking this "
+            "runner's requests, not a code bug. A placeholder CSV was written so "
+            "the artifact upload step succeeds, but this shard's data is empty. "
+            "Re-run with fewer parallel shards (lower matrix parallelism) or add "
+            "a longer stagger_sec, or run on a self-hosted runner with a stable IP."
+        )
+
     return csv_path
 
 
@@ -410,6 +449,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
-    parser.add_argument("--max-workers", type=int, default=32)
+    parser.add_argument("--max-workers", type=int, default=24)
+    parser.add_argument("--stagger-sec", type=int, default=25)
     args = parser.parse_args()
-    run_shard(args.shard_index, args.shard_count, args.max_workers)
+    try:
+        run_shard(args.shard_index, args.shard_count, args.max_workers, args.stagger_sec)
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)

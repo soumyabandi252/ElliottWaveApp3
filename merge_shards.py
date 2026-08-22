@@ -1,13 +1,5 @@
 """
-merge_shards.py
-================
-Combines all per-shard CSV outputs from ew_batch_runner_sharded.py into
-a single deduplicated master workbook covering the FULL US ticker
-universe, instead of the old single-job run that silently died partway
-through the alphabet.
-
-Usage:
-    python merge_shards.py --shard-count 8 --output-root ELL_Output
+merge_shards.py (v2 -- clearer diagnostics on partial/empty shards)
 """
 import argparse
 import glob
@@ -23,24 +15,43 @@ import elliott_wave_engine_FINAL_ALL_PHASES_OPTIMIZED_v2_WITH_DATES as ew
 def merge(output_root, shard_count):
     shard_dir = os.path.join(output_root, "SHARDS")
     frames = []
-    missing = []
+    empty_shards = []
+    missing_shards = []
     for i in range(shard_count):
         path = os.path.join(shard_dir, f"shard_{i}_of_{shard_count}.csv")
         if os.path.exists(path):
             df = pd.read_csv(path)
-            frames.append(df)
-            print(f"Shard {i}: {len(df)} rows")
+            print(f"Shard {i}: {len(df)} rows (file present)")
+            if len(df) == 0:
+                empty_shards.append(i)
+            else:
+                frames.append(df)
         else:
-            missing.append(i)
-    if missing:
-        print(f"WARNING: shards missing (will be absent from output): {missing}")
+            missing_shards.append(i)
+            print(f"Shard {i}: FILE MISSING (artifact never uploaded)")
+
+    if missing_shards:
+        print(f"WARNING: shard artifacts entirely missing: {missing_shards} "
+              "(likely the job crashed before writing any CSV, or upload-artifact "
+              "step itself failed)")
+    if empty_shards:
+        print(f"WARNING: shards ran but produced zero rows: {empty_shards} "
+              "(very likely Yahoo Finance / NASDAQ Trader rate-limited this run -- "
+              "check that shard's job log for the 'PRICE PREFETCH cache hit rate' line)")
+
     if not frames:
-        raise RuntimeError("No shard outputs found -- nothing to merge.")
+        raise RuntimeError(
+            "No shard produced any usable rows. All shards either failed to upload "
+            "an artifact or completed with zero rows. This is a network/rate-limit "
+            "issue on the runner, not a bug in this merge script -- check individual "
+            "shard job logs for 'PRICE PREFETCH cache hit rate' to confirm."
+        )
 
     combined = pd.concat(frames, ignore_index=True)
     if "Symbol" in combined.columns:
         combined = combined.drop_duplicates(subset=["Symbol"], keep="first")
-    print(f"Combined total: {len(combined)} unique tickers across {len(frames)} shard(s).")
+    print(f"Combined total: {len(combined)} unique tickers across {len(frames)} non-empty shard(s) "
+          f"(missing: {missing_shards}, empty: {empty_shards}).")
 
     base_filename = "Elliott_Wave_NASDAQ_Composite_Master_Workbook"
     extension = ".xlsx"

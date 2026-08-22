@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
@@ -27,17 +28,20 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run shard ${{ matrix.shard }}
-        run: python ew_batch_runner_sharded.py --shard-index ${{ matrix.shard }} --shard-count 8
+        run: python ew_batch_runner_sharded.py --shard-index ${{ matrix.shard }} --shard-count 8 --stagger-sec 40
 
       - name: Upload shard output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}
           path: ELL_Output/SHARDS/shard_${{ matrix.shard }}_of_8.csv
+          if-no-files-found: warn
           retention-days: 3
 
   merge:
     needs: scan-shard
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
