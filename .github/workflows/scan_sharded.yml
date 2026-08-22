@@ -1,0 +1,68 @@
+name: Full-Universe Elliott Wave Scan (Sharded)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 2 * * 6'   # Saturday 2:00 AM UTC (10 PM EST Friday)
+
+permissions:
+  contents: write
+
+jobs:
+  scan-shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run shard ${{ matrix.shard }}
+        run: python ew_batch_runner_sharded.py --shard-index ${{ matrix.shard }} --shard-count 8
+
+      - name: Upload shard output
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: ELL_Output/SHARDS/shard_${{ matrix.shard }}_of_8.csv
+          retention-days: 3
+
+  merge:
+    needs: scan-shard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download all shard outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: ELL_Output/SHARDS
+          pattern: shard-*
+          merge-multiple: true
+
+      - name: Merge shards into master workbook
+        run: python merge_shards.py --shard-count 8
+
+      - name: Commit updated master workbook
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Elliott_Wave_NASDAQ_Composite_Master_Workbook*.xlsx
+          git diff --cached --quiet && echo "No changes" || git commit -m "Full-universe scan: update master workbook [skip ci]"
+          git push
