@@ -1,4 +1,4 @@
-from ew_batch_runner import run_all_indexes
+from ew_batch_runner import run_custom_tickers
 
 if __name__ == "__main__":
-    run_all_indexes()
+    run_custom_tickers()
